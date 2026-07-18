@@ -2,7 +2,7 @@
 
 Разборы и эксплойты по задачам. По каждой — папка `taskN/` с `task.md` (условие) и `*_writeup.md` (разбор с логикой «как дошёл»).
 
-**Легенда:** ✅ решено (флаг есть) · 🔧 метод готов, добор за тобой · ⏳ агент дорабатывает · 🔒 блокер (нужен внутренний доступ / сеть Avito / условие)
+**Легенда:** ✅ решено (флаг есть) · 🔧 метод готов, добор за тобой · ⏳ агент решает (живой инстанс)
 
 ## Статус задач
 
@@ -15,11 +15,11 @@
 | 6 | B2Bee | Java sandbox escape | ✅ | `avito{juSt_34Sy_biG_DISCoUNt}` |
 | 7 | Pytome | Android WebView + deep-link | ✅ | `avito{pYThON_In_WEbv13w_1s_D4NGEroUs}` |
 | 8 | io_hrana | reversing (io_uring / окружение) | ✅ | `avito{tim3_1s_h0ney&hon3y_i5_7ime}` |
-| 9 | Нагибатор | web / pickle deserialization | 🔒 | sink найден; вход — из сети Avito (бэкенд внутренний) |
+| 9 | Нагибатор | web / pickle deserialization | ⏳ | sink `pickle.loads(raw)` (backend.py:204); агент ищет, как сделать `raw` управляемым (инстанс живой) |
 | 10 | Майя / Майес | crypto (3-слойный SPN, debug-утечка слоёв) | ✅ | `avito{…}` — впиши точное значение |
 | 11 | Government | web / broken access control | ✅ | `avito{hoN3Y_BAdgERS_allOwEd_1N_beehIVe_N0w}` |
 | 12 | Undercover | Linux privesc (cron→SGID→OTP-mail) | ✅ | `avito{the_OP3ra7I0n_wAS_suCce5sfuL}` |
-| 13–15 | Brainwash | web → RCE (Aim CVE-2024-2195) → Kubernetes | 🔒 | эксплойт готов; нужен ≥1 Run (сид :53800 из сети Avito) |
+| 13–15 | Brainwash | web → RCE (Aim CVE-2024-2195) → Kubernetes | ⏳ | RCE-гаджет готов; :53800 ингрессом не выставлен → агент ищет intended-путь создать Run с порта 80 (инстанс живой) |
 | 16 | SmartHive | web / гонка логов + replaceFirst-маскировка | ✅ | `avito{SmAr7_G4te_meaNS_eA5y_HonEy}` |
 | 17 | BeeSix (БИ-6) | crypto (netcat, исходники) | ⏳ | агент решает |
 | 18 | МёдХантер (invite) | web / SSRF → IMDS → .env | ✅ | `avito{ExcLu51V3_pDF_4cc3Ss_3NAblEd}` |
@@ -28,13 +28,13 @@
 | 21 | МёдХантер (секрет подписи) | web / crypto (подпись PDF) | ⏳ | ключ `mhq_v1_...` найден в бинаре; агент добивает |
 | — | МёдХантер (PDF-RCE, бонус) | web / dompdf RCE | ✅ | `avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}` (найден в S3) |
 
-**Итого флагов:** ✅ 12 подтверждённых (+ task10 — впиши значение) · 🔧 1 (task5) · ⏳ 3 в работе · 🔒 2 ждут внутреннего доступа.
+**Итого флагов:** ✅ 12 подтверждённых (+ task10 — впиши значение) · 🔧 1 (task5) · ⏳ 5 в работе (агенты на живых инстансах: 9, 13–15, 17, 20, 21).
 
 ## За тобой (быстрые доборы)
 
 - **task10** — пришли точное значение флага `avito{…}` (метод/solve в `task10/`), впишу и запушу.
 - **task5** — прогони `/original 4` через бота OnMute (`task5/onmute_task5_writeup.md`).
-- **task9 / task13–15** — эксплойты готовы (`task9/exploit_kit.py`, `task13/watch_and_pwn.sh`/`pwn_brainwash.py`); стреляют **из сети Avito** (у меня из песочницы egress только 80/443).
+- **task9 / task13–15** — инстансы живые, решаются агентами из обычного интернета (egress открыт, «сеть Avito» не нужна). task9: найти управляемый вход в `pickle.loads`. task13–15: intended-путь создать Run с порта 80 (не через :53800, он ингрессом не выставлен).
 
 ## Заметки
 - Все разборы также опубликованы приватными артефактами на claude.ai (ссылки в переписке).
