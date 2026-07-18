@@ -19,7 +19,9 @@
 | 10 | Майя / Майес | crypto (3-слойный SPN, debug-утечка слоёв) | ✅ | `avito{…}` — впиши точное значение |
 | 11 | Government | web / broken access control | ✅ | `avito{hoN3Y_BAdgERS_allOwEd_1N_beehIVe_N0w}` |
 | 12 | Undercover | Linux privesc (cron→SGID→OTP-mail) | ✅ | `avito{the_OP3ra7I0n_wAS_suCce5sfuL}` |
-| 13–15 | Brainwash | web → RCE (Aim CVE-2024-2195) → Kubernetes | ⏳ | RCE-гаджет готов; :53800 ингрессом не выставлен → агент ищет intended-путь создать Run с порта 80 (инстанс живой) |
+| 13 | Brainwash | web / AimQL RCE (CVE-2024-2195) | ✅ | `avito{3Xperim3n7s_aR3_unREL1aBl3_BU7_rcE_N3V3R_liEs}` |
+| 14 | Brainwash | Kubernetes / ephemeral containers | ✅ | `avito{wHa7_PaS5Es_For_trUth_1S_Eph3mERaL}` |
+| 15 | Brainwash | Kubernetes / node proxy → kubelet → hostPath | ✅ | `avito{Learn_Th3_ORCh3S7r4TioN_Not_The_ind0ctr1n4t1on}` |
 | 16 | SmartHive | web / гонка логов + replaceFirst-маскировка | ✅ | `avito{SmAr7_G4te_meaNS_eA5y_HonEy}` |
 | 17 | BeeSix (БИ-6) | crypto (netcat, исходники) | ⏳ | агент решает |
 | 18 | МёдХантер (invite) | web / SSRF → IMDS → .env | ✅ | `avito{ExcLu51V3_pDF_4cc3Ss_3NAblEd}` |
@@ -27,13 +29,15 @@
 | 20 | PAMgate | Linux / SSH + PAM/OTP/FTP | ⏳ | агент решает |
 | 21 | МёдХантер (секрет подписи) | web / dompdf RCE → S3-эксфил (recover HMAC key) | ✅ | `avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}` (= значение `PDF_SIGNING_KEY`) |
 
-**Итого флагов:** ✅ 12 подтверждённых (+ task10 — впиши значение) · 🔧 1 (task5) · ⏳ в работе на живых инстансах: 9, 13–15, 17, 20. Brainwash: подтверждён реальный seed-run (`28ae1dd9…`, эксперимент `medoed6`) + AimQL-RCE исполняется (200) — осталась эксфильтрация.
+**Итого флагов:** ✅ 15 подтверждённых (+ task10 — впиши значение) · 🔧 1 (task5) · ⏳ в работе на живых инстансах: 9, 17, 20. Цепочка Brainwash 13→14→15 полностью пройдена: AimQL-RCE → права `ci-runner` → ephemeral container → CSR `proxyman/node-proxymen` → kubelet WebSocket через привилегированный hostPath-под.
 
 ## За тобой (быстрые доборы)
 
 - **task10** — пришли точное значение флага `avito{…}` (метод/solve в `task10/`), впишу и запушу.
 - **task5** — прогони `/original 4` через бота OnMute (`task5/onmute_task5_writeup.md`).
-- **task9 / task13–15** — инстансы живые, решаются агентами из обычного интернета (egress открыт, «сеть Avito» не нужна). task9: найти управляемый вход в `pickle.loads`. task13–15: intended-путь создать Run с порта 80 (не через :53800, он ингрессом не выставлен).
+- **task9** — инстанс живой, осталось найти управляемый вход в `pickle.loads`.
+- **task17** — сейчас упирается в HTTP 429 на шаге с моделью.
+- **task20** — продолжается исследование PAM/FTP обхода chroot.
 
 ## Заметки
 - Все разборы также опубликованы приватными артефактами на claude.ai (ссылки в переписке).
