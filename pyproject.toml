@@ -20,6 +20,13 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+# Репозиторий .gitignore прячет всё, кроме двух curated-скриптов, но чистим ВСЁ дерево
+# одноразовых solver/exploit-скриптов task2..task21 → отключаем respect-gitignore.
+respect-gitignore = false
+# Вендоренный пакет aim + его venv — не наш код, не трогаем.
+# (venv/.venv/site-packages/__pycache__ уже в дефолтных excludes ruff.)
+# task13/aim_ui_core.py — дословная копия aim_ui/build/aim_ui_core.py (Pyodide/js), тоже вендор.
+extend-exclude = ["task13/aimsrc", "task13/aim_ui_core.py"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -36,6 +43,48 @@ ignore = [
     # прагматика инженерного кода
     "TRY003", "EM101", "EM102",  # текст исключения в месте выброса — читаемее
     "S603", "S607",              # subprocess без shell=True: вызовы docker/flow осознанны
+
+    # -- ниже: правила, неуместные для одноразовых CTF solver/exploit-скриптов --
+
+    # докстринги: PoC-скрипты не документируем
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    "D205", "D212", "D400", "D401", "D404", "D415", "D417",
+    # аннотации типов: не требуем в throwaway-коде
+    "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204", "ANN206", "ANN401",
+    # print/pprint — штатный вывод эксплойтов
+    "T201", "T203",
+    # security-линты на ОСОЗНАННЫХ exploit-вызовах (pickle/marshal/ftp/ssh/url-open/random/temp/assert/hardcoded)
+    "S101", "S104", "S105", "S106", "S108", "S110", "S112", "S113",
+    "S301", "S302", "S310", "S311", "S314", "S321", "S324", "S507", "S605", "S608",
+    # magic values и «слишком сложно» — норма для solver-скриптов
+    "PLR2004", "PLR0911", "PLR0912", "PLR0913", "PLR0914", "PLR0915", "PLR0916", "PLR0917",
+    "C901",
+    # глобалы / прочие PLW прагматики PoC
+    "PLW0602", "PLW0603", "PLW1510", "PLW1514", "PLW2901",
+    # pathlib-предпочтения: open()/os.path/os.replace в скриптах допустимы
+    "PTH",
+    # именование: крипто/математические ВЕРХНИЕ имена (N, P, Q, E, S…) осмысленны
+    "N802", "N803", "N806", "N814", "N815", "N816",
+    # прочая прагматика одноразовых скриптов
+    "INP001",           # это скрипты, а не пакеты (нет __init__.py)
+    "EXE001", "EXE002", # бит +x на shebang нам не важен
+    "BLE001",           # `except Exception` в exploit-циклах — осознанно
+    "SIM105", "SIM115", # contextlib.suppress / with-open: переписывать рискованно
+    "E402",             # импорт после sys.path-хака — обычное дело
+    "E501",             # длинные строки: URL/base64/payload не разбить
+    "E741",             # `l`,`I`,`O` встречаются в математическом коде
+    "ERA001",           # закомментированный код — отладочные заметки
+    "TRY300", "TRY301", # структура try — читаемость важнее
+    "FBT001", "FBT002", "FBT003",  # boolean-позиционные флаги в мелких утилитах
+    "SIM905",           # НЕ переписывать "слово слово…".split() в список: это payload-словари фаззера
+    "UP031",            # printf %-форматирование в payload/URL — валидно, переписывать рискованно
+    "PERF",             # микро-оптимизации (list-comprehension/copy) не нужны в PoC
+    "PLC0415",          # import внутри функции — ленивая/опциональная загрузка осознанна
+    "DTZ",              # naive datetime без tz — норма для одноразовых скриптов
+    "TRY004",           # TypeError-вместо-ValueError — придирка для PoC
+    "ARG001", "ARG002", "ARG003", "ARG004", "ARG005",  # неиспользуемые аргументы колбэков
+    "D301",             # r"""…""" для бэкслэшей в докстринге — некритично
+    "B023",             # замыкание над loop-var: в solved-коде колбэк вызывается внутри итерации
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -47,6 +96,14 @@ convention = "google"
 [tool.ty.environment]
 python-version = "3.14"
 root = ["./"]
+
+# ty по умолчанию уважает .gitignore → проверяет только curated-скрипты (task4/task7),
+# которые обязаны проходить `all = "error"`. Одноразовые solver/exploit-скрипты используют
+# неустановленные/браузерные зависимости (playwright, paramiko, cryptography, js, pyodide)
+# и динамические идиомы (re.match(...).group()) — их полная типизация вне задачи.
+# Явно исключаем вендоренные деревья на случай запуска ty с --no-respect-ignore-files.
+[tool.ty.src]
+exclude = ["task13/aimsrc", "task13/aim_ui_core.py"]
 
 [tool.ty.rules]
 all = "error"

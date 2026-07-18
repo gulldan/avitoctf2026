@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 BASE = "https://sopromed-vlrdcf4v.avitoctf.ru"
 PROF_USER = "prof_barsukov"
-PROF_PASS = "b4dger_st34ls_h0ney"  # noqa: S105
+PROF_PASS = "b4dger_st34ls_h0ney"
 TEST_ID = 1
 
 # Гугловский тестовый ключ reCAPTCHA v2 — с ним siteverify всегда success.
@@ -39,7 +39,7 @@ GOOGLE_TEST_SITEKEY = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"
 # Токен решённой капчи. Обычно подаётся аргументом / env CAPTCHA / task4/captcha.txt.
 MANUAL_CAPTCHA: str | None = None
 STUDENT_USER = "medoed_spy"
-STUDENT_PASS = "SpyBadger_123!"  # noqa: S105
+STUDENT_PASS = "SpyBadger_123!"
 
 HTTP_OK = 200
 HTTP_CREATED = 201
