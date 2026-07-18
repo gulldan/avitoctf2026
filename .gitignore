@@ -1,0 +1,24 @@
+# ==========================================================================
+# Curated CTF write-ups repo.
+# Strategy: ignore EVERYTHING, then re-include exactly what we keep —
+# write-ups (.md), task briefs, curated scripts, and repo config.
+# Agent scratch, binaries, archives, extracted trees, venvs, captures,
+# one-time secrets stay OUT of git (files remain on disk, just not committed).
+# ==========================================================================
+*
+
+# --- repo config / metadata ---
+!.gitignore
+!.python-version
+!README.md
+!pyproject.toml
+!uv.lock
+
+# --- task folders + their write-ups and briefs ---
+!task*/
+!task*/*_writeup.md
+!task*/task.md
+
+# --- curated deliverable scripts (must pass ruff + ty) ---
+!task4/solve_task4.py
+!task7/exploit_server.py

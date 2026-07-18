@@ -1,0 +1,52 @@
+[project]
+name = "avitoctf2026"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "requests>=2.34.2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.21",
+    "ty>=0.0.58",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # конфликтуют с ruff format / друг с другом
+    "COM812",  # trailing comma — управляет форматтер
+    "D203",    # incompatible с D211 (blank line before class)
+    "D213",    # incompatible с D212 (summary на первой строке)
+    # проект русскоязычный: кириллица в докстрингах/комментариях/строках — норма
+    "RUF001", "RUF002", "RUF003",
+    # прагматика инженерного кода
+    "TRY003", "EM101", "EM102",  # текст исключения в месте выброса — читаемее
+    "S603", "S607",              # subprocess без shell=True: вызовы docker/flow осознанны
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# ---------------------------------------------------------------------------
+# ty
+# ---------------------------------------------------------------------------
+[tool.ty.environment]
+python-version = "3.14"
+root = ["./"]
+
+[tool.ty.rules]
+all = "error"
