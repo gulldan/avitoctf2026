@@ -78,11 +78,70 @@ target'а, а такого Run на этом инстансе взять нео�
 не пробить. Если бы у нас уже был RCE внутри пода — оттуда (localhost:53800 или через
 ClusterIP) это могло бы сработать, но именно RCE и есть то, чего не хватает (курица/яйцо).
 
+### Reports/Pyodide (CVE-2025-51464) — проверено живым браузером (Playwright)
+
+Установил Playwright+Chromium в venv (`aimsrc/venv312`). Поднял реальный headless Chrome,
+зашёл на `/reports`, создавал репорты через `POST /api/reports` и открывал их в браузере
+(`pw_report_*.py` скрипты в task13/) — код **реально исполняется** через настоящий Pyodide
+(WASM Python в браузере), но только если обёрнут в ```` ```aim ... ``` ```` code fence — без
+фенса рендерится как обычный markdown-текст (не исполняется).
+
+Подтверждена реальная XSS (CVE-2025-51464): `pyodide.code.run_js("fetch('/flag').then(...)")`
+реально делает fetch к бэкенду и вызывает `alert()` с результатом (сам `/flag` эндпоинта не
+существует — упал на SPA-заглушку, но факт исполнения и реального fetch подтверждён).
+
+Проверил ГЛАВНЫЙ вопрос — есть ли у Pyodide-окружения мост к бэкенд-репо, которым можно
+засеять Run:
+- `import aim` (настоящий SDK) **исполняется в NameError** — препроцессор Aim явно вырезает
+  это выражение перед запуском (санитайзер против ровно этой атаки), реального пакета `aim`
+  в песочнице нет и не появляется даже через `micropip.install`.
+- В globals доступен объект `repo` (плюс `search`/`find`/`DataFrame`/`LineChart` и т.д. —
+  весь Board API), но `dir(repo)` = **только** `fetch_runs, fetch_metrics, fetch_images,
+  fetch_audios, fetch_figures, fetch_texts` — это READ-ONLY обёртки над теми же
+  `/api/runs/search/*`, никакого `create_run`/`track`/write-метода нет.
+
+**Вывод:** Pyodide-мост подтверждённо read-only, писать раны через Reports/Board
+невозможно — это тупик для разблокировки CVE-2025-5321, хотя сама XSS реальна и рабочая
+(годится как самостоятельный, но клиентский баг — у этого инстанса нет второго
+пользователя/админ-бота, которого можно было бы атаковать через неё).
+
 Также по просьбе перепроверил вживую (не только по исходникам) остальные search-эндпоинты
 (`/api/runs/search/{run,metric,images,audios,texts,distributions,figures}`) с тем же
 payload'ом инъекции — везде 0 байт, precondition идентичен. `experiments/search` и
 `tags/search` — обычный LIKE-поиск по имени, инъекция туда не заходит (подтверждено и по
 коду, и вживую). Создание experiment/tag/app/dashboard через POST работает
 (unauthenticated), но ни один из этих объектов не участвует в AimQL
-(`allowed_params = {run, metric, images, audios, distributions, figures, texts}` в
-`aim/storage/query.py`) — тестовые experiment/tag созданы и удалены (cleanup выполнен).
+(`allowed_params = {run, metric, images, audios, distributions, figures, texts}`
+в `aim/storage/query.py`) — тестовые experiment/tag созданы и удалены (cleanup выполнен).
+
+### Полный список известных Aim CVE (research через `gh api /advisories`) — вердикт по каждой
+
+Актуальная версия target'а: 3.29.1 (последний релиз aimhubio/aim, новых с 2025-05-08 нет).
+
+**Актуальны (не пофикшены в 3.29.1):**
+- **CVE-2025-5321** (GHSA-gp5h-f9c5-8355) — тот же самый RCE-класс, что и CVE-2024-2195
+  (тот же гаджет `run.db.runs().session...`). Требует ≥1 Run — блокер тот же.
+- **CVE-2025-51464** (GHSA-gmvv-rj92-9w35) — XSS в `/api/reports` через Pyodide. Рана НЕ
+  требует. Подтверждена живьём (см. выше) — но client-side-only, для нашего одноместного
+  инстанса без второго пользователя/бота бесполезна как способ добраться до файлов сервера.
+- **CVE-2025-51463** (GHSA-6gj6-5cm3-g43x) — path traversal в `restore_run_backup()`
+  (`aim/sdk/utils.py`), даёт arbitrary file write. НО путь к ней — только через
+  `Client.run_instruction()` → remote-tracking RPC (`aim server`, порт 53800) — тот же
+  недостижимый снаружи канал, что и для CVE-2025-5321/2024-2195 (проверил по коду: вызывается
+  только из `Repo._restore_run()`, которая дергается либо при локальном SDK, либо через
+  `_remote_repo_proxy` — оба варианта не наши).
+
+**Уже пофикшены до 3.29.1 (историчны, неприменимы к этому таргету):** CVE-2024-2195 (RCE,
+предшественник 2025-5321), CVE-2024-8238 (safer_getattr/format_map leak), CVE-2024-8769
+(LockManager traversal → delete), CVE-2024-6851 (glob traversal → delete), CVE-2024-6829
+(tarfile.extractall write), CVE-2024-6483 (delete-batch traversal), CVE-2024-6396 (backslash
+traversal), CVE-2024-7760 (permissive CORS/CSRF), CVE-2024-2196 (CSRF delete/steal),
+CVE-2024-8863/8101/6578 (stored XSS в Text Explorer/logs — client-side, тоже нужен
+второй зритель), CVE-2021-43775 (arbitrary file read, <3.1.0 — предок текущего
+`os.path.commonpath`-guard в `/static-files/`), DoS-кластер (2024-6227/10110/12777/12778/8061,
+2025-0189/0190) — доступность, не file-read/RCE.
+
+**Итог по CVE-research:** ни одна публично известная уязвимость Aim ≤3.29.1 не даёt
+file-read/RCE БЕЗ (а) существующего Run, либо (б) доступа к remote-tracking порту 53800.
+Обе прекондиции недостижимы с текущей позиции (см. выше). Reports/Pyodide (единственная
+дыра без прекондиции по Run) — read-only bridge, подтверждено практически.
