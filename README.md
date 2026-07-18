@@ -25,10 +25,9 @@
 | 18 | МёдХантер (invite) | web / SSRF → IMDS → .env | ✅ | `avito{ExcLu51V3_pDF_4cc3Ss_3NAblEd}` |
 | 19 | МёдХантер (золотая звезда) | web / reverse (SSRF→registry→бинарь) | ✅ | `avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}` |
 | 20 | PAMgate | Linux / SSH + PAM/OTP/FTP | ⏳ | агент решает |
-| 21 | МёдХантер (секрет подписи) | web / crypto (подпись PDF) | ⏳ | ключ `mhq_v1_...` найден в бинаре; агент добивает |
-| — | МёдХантер (PDF-RCE, бонус) | web / dompdf RCE | ✅ | `avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}` (найден в S3) |
+| 21 | МёдХантер (секрет подписи) | web / dompdf RCE → S3-эксфил (recover HMAC key) | ✅ | `avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}` (= значение `PDF_SIGNING_KEY`) |
 
-**Итого флагов:** ✅ 12 подтверждённых (+ task10 — впиши значение) · 🔧 1 (task5) · ⏳ 5 в работе (агенты на живых инстансах: 9, 13–15, 17, 20, 21).
+**Итого флагов:** ✅ 12 подтверждённых (+ task10 — впиши значение) · 🔧 1 (task5) · ⏳ в работе на живых инстансах: 9, 13–15, 17, 20. Brainwash: подтверждён реальный seed-run (`28ae1dd9…`, эксперимент `medoed6`) + AimQL-RCE исполняется (200) — осталась эксфильтрация.
 
 ## За тобой (быстрые доборы)
 
