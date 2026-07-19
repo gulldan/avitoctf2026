@@ -1,111 +1,227 @@
 # СотоLambda — write-up
 
-**Flag:** `avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}`
-**Class:** Reverse / Misc / "Ctb" (capture-the-bug) — a leaked root file descriptor in a fake "sandbox" job runner.
+**Флаг:** `avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}`
+**Класс:** Reverse / Linux internals («capture-the-bug» — найти намеренно заложенный баг в
+раннере джобов) · **Сложность:** не опубликована платформой (своя оценка: Medium — нет исходников,
+нужны и статический RE, и живое динамическое подтверждение, но сама выигрышная примитива —
+логическая, не memory-corruption) · **Очки:** не опубликованы · **Решило команд:** не опубликовано
+**Автор:** не атрибутирован в доступных материалах
+
+**Суть решения в одном абзаце.** «СотоLambda» исполняет загруженный ELF от имени того Unix-аккаунта,
+которым ты аутентифицировался, используя настоящую аутентификацию через `/etc/shadow` плюс rlimit'ы
+— без seccomp/namespaces/chroot, поэтому аутентификация под любым аккаунтом уже означает
+произвольный код от его имени. Загвоздка — пароль `root` неизвестен, а все достижимые SUID-эскалации
+захардены. Подсказка задания («вычислительный рой не всегда убирает за собой служебные следы»)
+указывает на реальный баг: обработчик `SIGALRM`-таймаута делает `siglongjmp` из цикла обработки
+запроса и пропускает закрытие root-открытого файлового дескриптора `/etc/shadow`, поэтому каждая
+затаймаутившая джоба сливает один такой fd в долгоживущий процесс-воркер; эти утёкшие fd не имеют
+`O_CLOEXEC` и переживают `fork()`+`execv()` в наш загруженный бинарь, позволяя непривилегированному
+потомку прочитать `/etc/shadow` через fd, открытый root'ом. Дампим файл, крекаем крекабельный
+DES-crypt хэш root'а, затем просто аутентифицируемся как `root`, чтобы ELF исполнился от uid 0.
 
 ---
 
-## 1. The challenge
+## 1. Задача
 
-"СотоLambda" is a cloud-compute service for the Hive: you upload a Linux x86-64 **ELF**,
-set resource limits + a deadline, and a "swarm" executes it and returns the result.
-Contractors got **test credentials** and a **demo binary**. The hint: *«вычислительный рой
-не всегда убирает за собой служебные следы»* ("the swarm doesn't always clean up its
-service traces") → a leaked-resource bug. Goal: read `/root/flag.txt`. Provided artifact:
+"СотоLambda" — облачный вычислительный сервис Улья: загружаешь Linux x86-64 **ELF**, задаёшь
+лимиты ресурсов и дедлайн, "рой" исполняет его и возвращает результат. Подрядчикам выдали
+**тестовые креды** и **демо-бинарь**. Подсказка: *«вычислительный рой не всегда убирает за собой
+служебные следы»* — намёк на утечку ресурса. Цель: прочитать `/root/flag.txt`. Артефакт:
 `sandbox_worker.elf`.
 
-## 2. Recon — the service and the worker
+## 2. Разведка
 
-Live front-end: `https://elflambda-<id>.avitoctf.ru` (ephemeral, ~15-min instances).
-- `GET /api/config` → **`{"auth":{"login":"runner","password":"runner"}, ...}`** — the test creds.
-- `GET /api/binaries` → a seeded `hello-world` binary; `POST /api/upload` (multipart `file`) → `{binary_id}`.
-- `POST /api/invoke {"binary_id","args","stdin","auth":{"login","password"}}` → runs the ELF, returns `{stdout,stderr,exit_code,timed_out,error}`.
+Живой фронтенд: `https://elflambda-<id>.avitoctf.ru` (эфемерные инстансы, ~15 минут жизни).
 
-Reverse-engineering `sandbox_worker.elf` (x86-64, **not stripped**, GCC 12, PIE/NX/Partial-RELRO,
-**no stack canary / no FORTIFY** — deliberately stripped) shows the worker's per-request flow
-(`handle_request`):
+- `GET /api/config` → `{"auth":{"login":"runner","password":"runner"}, ...}` — тестовые креды.
+- `GET /api/binaries` → засеянный `hello-world`; `POST /api/upload` (multipart `file`) →
+  `{binary_id}`.
+- `POST /api/invoke {"binary_id","args","stdin","auth":{"login","password"},"sandbox_settings":
+  {"memory_mb","timeout_ms"}}` → запускает ELF, возвращает `{stdout,stderr,exit_code,timed_out,
+  error}`.
 
-1. `open("/etc/shadow")` (as **root**), read the entry for the requested `login`.
-2. Verify the password with `crypt()`.
-3. Set 4 rlimits (CPU/FSIZE/AS/NOFILE), create 3 pipes, `fork()`.
-4. In the child: `setresgid`/`setresuid` **drop to the authed user** (only if the worker is root — it is), then `execv(binary, argv)` — the uploaded ELF.
+Реверс `sandbox_worker.elf` (x86-64, **не стриппован**, GCC 12, PIE/NX/Partial-RELRO, **нет
+стек-канарейки / нет FORTIFY** — стриппованы намеренно) вскрывает `handle_request()`:
 
-So the "sandbox" is a misnomer: **no seccomp, no namespaces, no chroot, no capability drop** —
-just Unix password auth + rlimits + a raw `execv` on the real host filesystem. Authenticating
-as a user runs your ELF **as that user**.
+1. `fgets()` одну строку JSON, парсит поля (`login`,`password`,`binary`,`args`,`stdin`,
+   `timeout_ms` ≤5000мс, `memory_mb` ∈[8,256], `max_fds` ∈[4,1024]).
+2. `open("/etc/shadow")` (как **root**, `flags=0` — **без `O_CLOEXEC`**), читает запись для
+   `login`, отклоняет заблокированные аккаунты (`sp_pwdp[0] ∈ {'!','*'}`), сверяет `crypt()`.
+   Фолбэк при ошибке open — `popen("curl -sf https://.../", "rb")`.
+3. Ставит 4 rlimit (CPU/FSIZE/AS/NOFILE — **нет `RLIMIT_NPROC`**), заводит таймер job'а через
+   `setitimer`+`sigsetjmp`, создаёт 3 pipe (`O_CLOEXEC`), `fork()`.
+4. В потомке: `setgroups(0)`→`setresgid`→`setresuid` (все return-checked) — **дропает права до
+   аутентифицированного юзера**, затем `execv(binary, argv)` — наш загруженный ELF, среда
+   родителя наследуется как есть.
 
-## 3. Foothold: arbitrary code as `runner`
+Итог разведки: "песочница" — это только DAC-аутентификация + rlimits + голый `execv` на реальной
+файловой системе хоста. Никакого seccomp/namespaces/chroot/capability-drop. Аутентификация под
+любым валидным аккаунтом = произвольный код **от имени этого аккаунта**.
 
-Build a tiny **static** `execve("/bin/sh")` ELF (159 bytes, hand-assembled — no cross-toolchain
-needed), upload it, and invoke with `runner`/`runner`, putting shell commands in the `stdin`
-field (the container is a full Ubuntu with `/bin/sh`). That's reliable RCE **as `runner`
-(uid 1000)**. But `/root/flag.txt` is `0700 root` — `runner` can't read it. We need **root**.
+## 3. Как мы вышли на решение (логика гипотез)
 
-## 4. Dead ends (mapped, so we knew where the bug wasn't)
+**Наблюдение 1.** Собрать крошечный статический `execve("/bin/sh")` ELF (159 байт, руками
+собранный шеллкод — без тулчейна) и вызвать его под `runner`/`runner` — стабильный RCE как
+`runner` (uid 1000). Но `/root/flag.txt` — `0700 root`, `runner` его не читает. Нужен root.
 
-- Auth is solid: `crypt()==shadow_hash`, fails closed; `root`/weak passwords rejected.
-- Priv-drop is solid: `setres*id` return values checked, `setgroups()` called, fail-closed.
-- `binary_id` is validated by the front-end (traversal / arbitrary path → `404 unknown_binary`).
-- Uploads dir is read-only; no custom SUID binary; `RLIMIT_NPROC` unlimited (no setuid-fail-open);
-  exhaustive fuzzing (1100+ cases) found **no stack overflow** despite the stripped canary.
+**Гипотеза A — переполнение стека.** Стриппованная канарейка + FORTIFY выглядят как приглашение к
+memory-corruption. **Тупик:** фаззинг 1100+ кейсов входного JSON не нашёл ни одного
+fixed-buffer off-by-one; статический дифф cJSON 1.7.19 чист. Отложено фаззеру отдельной дорожкой,
+но собственными руками ничего не нашли — вход не туда, куда указывала самая пугающая на вид
+защита.
 
-## 5. The bug — a leaked root `/etc/shadow` file descriptor
+**Гипотеза B — SUID-бинарь через `execv`.** Раз `execv()` резолвит путь как есть без
+`stat`/`realpath`, можно запустить существующий SUID-root бинарь. **Проверка:** механизм реально
+работает (подтверждено динамически). **Тупик:** все достижимые SUID-бинари на живом инстансе —
+захардненный Debian shadow-utils, которые отвергают привилегированные операции при несовпадении
+real-uid. Ничего не дало, но механизм оставлен «на подхвате» на случай смены образа.
 
-Two facts combine into the intended primitive (the "trace the swarm doesn't clean up"):
+**Гипотеза C — баг координатора #1: `popen(cmd,"rb")` → неаккуратный `fileno(NULL)`.**
+Дизассемблинг `0x2738-0x2753` показывает `popen(url,"rb")` без проверки возврата перед
+`fileno()`. Динамически подтвердили: `"rb"` — невалидный режим для glibc `popen()` (валиден
+только для `fopen()`), возврат `NULL`, `fileno(NULL)` → SIGSEGV. **Тупик:** этот `open("/etc/
+shadow")` вызывается на **каждый** запрос, до разбора JSON — управлять тем, упадёт ли именно этот
+`open()`, из содержимого джобы нельзя (единственный теоретический рычаг, `EMFILE`, недостижим:
+`RLIMIT_NOFILE` применяется через `setrlimit()` **внутри форкнутого потомка**, уже после `fork()`,
+и не может исчерпать fd-таблицу самого родителя). Реальный баг, но не триггерится с публичной
+поверхности.
 
-**(a) The timeout path leaks the shadow fd.** The worker installs a `SIGALRM` handler that,
-on a job timeout, calls **`siglongjmp`** back to the main loop. That unwind path closes only the
-job's **pipe** fds — it never closes `/etc/shadow`, which was opened at VA `0x2501` with
-`flags=0` (**no `O_CLOEXEC`**). So **every timed-out request leaks one root-opened `/etc/shadow`
-fd** into the *persistent* worker process. (Confirmed dynamically: 30 timed-out requests raised
-the worker's fd count from 3 to 33.)
+**Гипотеза D — баг координатора #2: отсутствие проверки EOF у `fgets()`.** Потенциальный
+бесконечный replay последней джобы. **Тупик:** DoS максимум, не привесc, и тоже не
+триггерится через `/api/invoke` (нужно, чтобы `elflambda` сам закрыл pipe воркера).
 
-**(b) fds inherit across `execv`.** The child closes only the *current* request's shadow fd (one
-tracked variable); the **leaked** fds from prior timeouts (different fd numbers, untracked, no
-CLOEXEC) survive `fork` + the priv-drop + `execv` into **our** ELF. Permissions on a file are
-checked at `open()` time — and it was opened by **root** — so `runner` can read through the
-inherited fd freely.
+**Гипотеза E — fd 3 (утечка из прошлой сессии заметок).** Внутри своего же `shell.elf` видно
+`fd 3 -> /proc/389/fd` — fd директории, унаследованный от того, кто заспавнил
+`sandbox_worker` при старте контейнера. **Тупик:** к моменту, когда джоба может это увидеть, pid
+389 уже мёртв (перепроверено на свежем инстансе — воспроизводится каждый раз, но триггера
+поймать fd "живым" нет: воркеры не респавнятся в течение обычной 15-минутной сессии, а
+единственные найденные краш-примитивы (C, D) не атакер-триггерящиеся).
 
-> The `open("/etc/shadow")`-fails → `popen("curl -sf <url>", "rb")` → `fileno(NULL)` "remote
-> shadow fetch" is a **red herring**: `"rb"` is an invalid `popen` mode → glibc returns `NULL`
-> → the fallback can only crash. Root was reachable purely locally.
+**Гипотеза F — оставленные следы/креды в файловой системе** (буквальная отработка подсказки).
+Обшарили `/etc/passwd`, `/home`, `/var/mail`, `/var/local`, `/usr/local/bin` (строки
+`elflambda` — единственное похожее на секрет — `{{.DefaultPassword}}`, HTML-плейсхолдер,
+подтверждающий, что `runner`/`runner` шаблонизируется per-instance), `/proc/1/environ`,
+`/var/log/apt/history.log`, cron. **Тупик:** ничего не нашли, `/root` герметичен (`0700`, даже
+`find` получает `Permission denied`).
 
-## 6. Exploit chain (end-to-end, live)
+**Прорыв.** Динамическая трассировка (`strace -f`) полного happy-path подтвердила побайтово
+статический анализ — и заодно показала, что `/etc/shadow`-fd закрывается на **нормальном** пути и
+в потомке, и в родителе. Но у джобы есть **третий** путь выполнения — не success, не error, а
+**timeout**: `SIGALRM`-обработчик делает `siglongjmp` обратно в главный цикл. Перечитав именно
+этот блок кода (`0x2678`-`0x2717`), увидели: он закрывает только pipe-халвы job'а (`parent_stdin_
+fd`/`stdout_fd`/`stderr_fd`, если ≥0) — **fd `/etc/shadow` (хранится в `ebp`) там не упомянут
+вообще**. Гипотеза: таймаут — это ровно та "неубранная служебная утечка" из подсказки задания.
+**Проверка:** 30 намеренно таймаутящихся запросов (`timeout_ms=1`, `stdin="sleep 3"`) подняли
+число fd воркера с 3 до 33 — подтверждено. Комбинируем с тем, что этот fd открыт без
+`O_CLOEXEC` и потомок закрывает явно только *свой* (текущий) shadow-fd, а не чужие утёкшие номера
+→ они переживают `fork`+priv-drop+`execv` в наш загруженный бинарь. DAC-права проверяются в
+момент `open()`, а не `read()` — открыл root, значит и мы прочитаем через унаследованный fd.
 
-1. **Upload** the `execve("/bin/sh")` ELF → `binary_id`.
-2. **Leak:** send ~50 `/api/invoke` with `timeout_ms=1`, `stdin="sleep 3"`, `runner`/`runner`.
-   Each returns `timed_out:true` and leaks one `/etc/shadow` fd. (Spray to hit all ~4 round-robin
-   workers; keep batches **under the worker's `RLIMIT_NOFILE`** — if `open("/etc/shadow")` ever
-   fails you hit the `popen("rb")`/`fileno(NULL)` crash and the worker respawns, wiping the leaks.)
-3. **Read:** a normal invoke whose `stdin` is a **perl** one-liner that reads the inherited fd
-   *directly*: `open(FH,"<&=$N"); sysseek(FH,0,0); sysread(...)`. Two gotchas:
-   - Read the inherited fd directly — **not** via `cat /proc/self/fd/N`, which re-`open()`s
-     `/etc/shadow` as `runner` → `EACCES`.
-   - `lseek(fd,0)` is **mandatory** — the leaked fds sit at EOF (the auth code `dup`/read left
-     the offset at end), so a plain read returns nothing. Hence perl, not dash.
-   → dumps full `/etc/shadow`.
-4. **Crack:** `root`'s entry is **not locked** — it's a classic 13-char **DES-crypt** hash
-   `azMuiLc/ZPwrM` (salt `az`). `hashcat -m 1500` cracks it in a blink → **root password = `mole`**.
-5. **Root:** `/api/invoke` with `auth:{login:"root", password:"mole"}` → the worker authenticates
-   root, `setresuid(0,0,0)` is a no-op, and `execv`s our ELF as **uid 0** → `cat /root/flag.txt`.
+**Тупик по чтению.** Первая попытка прочитать унаследованный fd через `cat /proc/self/fd/N` —
+провал: это **повторно открывает** `/etc/shadow` от имени `runner` → `EACCES` (permission
+проверяется заново при новом `open`, а не при доступе к существующему открытому файлу). Нужно
+читать именно **существующее shared open-file-description**, не переоткрывая путь. На боксе есть
+`perl`: `open(FH,"<&=$N")` привязывает файловый хендл к номеру fd напрямую, без `open()`.
 
-## 7. Flag
+**Тупик по офсету.** Прямое чтение через `perl` тоже сначала возвращало пусто — унаследованные fd
+стоят на **EOF**: auth-код делает `dup()`, которое делит файловый *offset* с оригиналом, и чтение
+`crypt()`-проверки в auth-пути уже продвинуло позицию до конца файла (616 байт). Обязателен
+`sysseek($F,0,0)` перед `sysread` — отсюда `perl`, а не `dash`/`cat`, у которых нет прямого
+`lseek` на конкретный номер fd.
+
+## 4. Уязвимость
+
+Два независимых, но комбинирующихся бага в `sandbox_worker.elf`:
+
+1. **CWE-403 (Improper Check for Unusual Conditions) / отсутствие `O_CLOEXEC`.** Root-процесс
+   открывает `/etc/shadow` без `O_CLOEXEC` в начале каждого запроса (`open()` на VA `0x2501`) и
+   держит fd в `ebp` весь запрос. По success/error-путям fd закрывается корректно, но путь
+   **таймаута** (`SIGALRM` → `siglongjmp` из `alarm_handler` в `sigsetjmp`-точку главного цикла,
+   VA `0x2678`-`0x2717`) закрывает только pipe-fd job'а — код закрытия `ebp` в него не входит. Fd
+   утекает в персистентный воркер-процесс, по одному на каждый таймаутнутый запрос, накапливаясь.
+2. **Наследование через `execv` без ревокации.** Потомок явно закрывает только *текущий*,
+   отслеживаемый shadow-fd перед `execv()`; утёкшие fd прошлых таймаутов — другие номера, о
+   которых код-потомок не знает — переживают `fork()`, `setresuid`-дроп прав и `execv()`
+   неизменными (нет `O_CLOEXEC`, никто их явно не закрывает). Итог: непривилегированный процесс
+   стартует, уже владея открытым root'ом файловым дескриптором на `/etc/shadow`.
+
+Комбинация превращает "утечку ресурса" в полноценное чтение `/etc/shadow` от лица `runner`, а
+дальше — в обычную задачу оффлайн-крека пароля.
+
+## 5. Эксплойт по шагам
+
+1. **Foothold.** Собрать `shell.elf` (`mkelf.py`) — статический `execve("/bin/sh")`, читающий
+   команды из унаследованного `stdin`. Загрузить:
+   ```
+   curl -F file=@shell.elf https://elflambda-<id>.avitoctf.ru/api/upload   # -> {"binary_id": BID}
+   ```
+2. **Слив (leak).** ~50 запросов `/api/invoke` с гарантированным таймаутом, `runner`/`runner`:
+   ```
+   curl -X POST https://elflambda-<id>.avitoctf.ru/api/invoke -H 'Content-Type: application/json' \
+     -d '{"binary_id":"BID","stdin":"sleep 3\n","auth":{"login":"runner","password":"runner"},
+          "sandbox_settings":{"memory_mb":64,"timeout_ms":1}}'
+   ```
+   (Держать пачки в пределах `RLIMIT_NOFILE` воркера — переполнение триггерит несвязанный краш
+   `popen(...,"rb")`→`fileno(NULL)`, который убивает и респавнит воркер, обнуляя слитые fd.)
+3. **Чтение.** Один обычный invoke, чей `stdin` — perl-однострочник, сканирующий номера fd,
+   привязывающийся к каждому без `open()`, сбрасывающий офсет в 0 и читающий:
+   ```perl
+   perl -e 'for my $n (3..200){
+     open(my $F, "<&=" . $n) or next;
+     my $pos = sysseek($F,0,0); next unless defined $pos;
+     my $buf=""; my $r=sysread($F,$buf,65536);
+     next unless $r && $buf =~ /:/;
+     print "###FD".$n." len=".$r."\n".$buf; last; }'
+   ```
+   Отправить через `/api/invoke` (`timeout_ms:1000`, `runner`/`runner`) — при загруженных
+   воркерах любой из них отдаёт полный `/etc/shadow`.
+4. **Крек.** Запись `root` — не заблокирована: `root:azMuiLc/ZPwrM:...` — 13-символьный
+   traditional **DES-crypt** (соль `az`). `hashcat -m 1500 root.hash rockyou.txt` мгновенно даёт
+   `azMuiLc/ZPwrM:mole` → пароль root = **`mole`**.
+5. **Root.** `/api/invoke` с `auth:{"login":"root","password":"mole"}` — воркер аутентифицирует
+   root, `setresuid(0,0,0)` no-op, `execv` нашего ELF от uid 0:
+   ```
+   curl -X POST https://elflambda-<id>.avitoctf.ru/api/invoke -H 'Content-Type: application/json' \
+     -d '{"binary_id":"BID","stdin":"cat /root/flag.txt\n",
+          "auth":{"login":"root","password":"mole"},
+          "sandbox_settings":{"memory_mb":64,"timeout_ms":2000}}'
+   ```
+   → `avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}`.
+
+Автоматизация всех пяти шагов — `mkelf.py` (генерирует `shell.elf`; сеть/HTTP-логику см. §8).
+
+## 6. Флаг
 
 ```
 avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}
 ```
 
-## 8. Takeaways
+## 7. Выводы
 
-1. A "sandbox" that is only DAC + rlimits + `execv` is not isolation — authenticating as any
-   user runs your code as that user.
-2. The real bug was the **"trace not cleaned up"** from the flavor text: a root-opened fd leaked
-   (no `O_CLOEXEC`) by a `siglongjmp`-from-signal-handler unwind that skips its cleanup, then
-   **inherited across `execv`** by a lower-privileged child. File perms are checked at open, not
-   read — an inherited root fd bypasses them.
-3. Chase the flavor text, not just the scariest-looking primitive: the stripped stack canary
-   drew everyone toward a memory-corruption hunt (1100+ fuzz cases, nothing), while the intended
-   path was a plain leaked file descriptor.
+1. "Песочница", реализованная только через DAC-аутентификацию + rlimits + голый `execv`, — не
+   изоляция: аутентифицировался под юзером — код исполняется от его имени. Нужны как минимум
+   seccomp/namespaces/chroot, а не одни лишь rlimit'ы.
+2. Путь очистки ресурсов **обязан** покрывать *все* выходы из функции, включая асинхронные
+   (`siglongjmp` из обработчика сигнала) — «закрыл в success/error путях» не значит «закрыл
+   везде»; отсутствие `O_CLOEXEC` на привилегированном fd превращает любой такой пропуск в
+   privesc через `fork`+`execv`.
+3. Гоняться нужно за подсказкой из легенды задания, а не за самым страшным на вид примитивом:
+   стриппованная канарейка тянула всех в сторону memory corruption (1100+ фазз-кейсов, ничего), а
+   интендед-путь — обычный leaked file descriptor, который явно назван в тексте задачи.
 
-**Artifacts:** `AUTHROOT_NOTES.md` (full chain w/ exact VAs, recovered `/etc/shadow`, the perl
-reader), `NOTES.md`/`OPTIONS_NOTES.md` (RE + enumeration), `shell.elf`, `FLAG.txt`.
+## 8. Артефакты
+
+- `mkelf.py` — curated-скрипт: собирает `shell.elf` (159-байтный статический
+  `execve("/bin/sh")`, руками написанный шеллкод — воспроизводит §5 шаг 1). Сетевые
+  HTTP-запросы шагов 2-5 — тривиальные POST на `/api/upload`/`/api/invoke` (см. точные payload'ы
+  выше и в `AUTHROOT_NOTES.md`).
+- `payload.c` — вспомогательный C-источник альтернативного раннера (`execvp(argv[1..])` в
+  args-режиме, иначе `system(stdin)`); не используется `mkelf.py` напрямую, оставлен как
+  запасной вариант загружаемого бинаря.
+- `NOTES.md` — полный статический реверс `sandbox_worker.elf` (побайтовый разбор
+  `handle_request`).
+- `OPTIONS_NOTES.md` — динамическая трассировка (`strace -f`) + полное перечисление всех
+  рассмотренных путей до root (§3 выше — прямое отражение этого файла).
+- `AUTHROOT_NOTES.md` — итоговая цепочка эксплойта end-to-end с точными VA и восстановленным
+  `/etc/shadow`.
+- `shell.elf`, `FLAG.txt`.

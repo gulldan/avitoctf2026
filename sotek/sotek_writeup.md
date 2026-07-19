@@ -1,113 +1,180 @@
 # СОТЭК — write-up
 
-**Flag:** `avito{vERy_Sus_b4DGeR_Detect3d_bY_cAMerA}`
-**Class:** Web — second-order (stored) SQL injection → blind boolean session-token exfil → session replay.
+**Флаг:** `avito{vERy_Sus_b4DGeR_Detect3d_bY_cAMerA}`
+**Класс:** Web / second-order SQL injection → blind-boolean exfil → session takeover · **Сложность:** не опубликована · **Очки:** не опубликованы · **Решило команд:** не опубликовано
+**Автор:** не опубликован
+
+**Суть решения в одном абзаце.** Флаг печатается сервером только тому пользователю, у которого
+есть хотя бы один заказ, а такой заказ есть только у одного посевного агента, чей пароль —
+несбрасываемый `crypto.randomUUID()`. Значит, задача — не "взломать пароль", а "стать этим
+пользователем". Единственная лазейка внутрь БД — собственное поле `postalCode` при регистрации:
+SQLite хранит нечисловую строку в колонке `INTEGER` как есть (type affinity), а `rates.ts`
+подставляет это значение в SQL без экранирования. Из этого получается **second-order** (сначала
+сохранили, потом выполнили) SQL-инъекция, которую превращаем в **слепой булев оракул** через
+наблюдаемый `rates`-массив в ответе `/api/calculate`, и им посимвольно вытаскиваем чужой live
+`session_id` прямо из таблицы `sessions`.
 
 ---
 
-## 1. The challenge
+## 1. Задача
 
-СОТЭК is a delivery service. A parcel (a "disguise kit") was **mis-delivered**; the only
-delivery-proof photo lives in the receiving **agent's cabinet**, and her password is
-inaccessible. Task: find out **who actually received the parcel** — i.e. get into that agent's
-cabinet and read the proof. Provided: the app **source** (Next.js / TypeScript, `better-sqlite3`).
+СОТЭК — сервис доставки. Легенда: посылку ("комплект маскировки") доставили не туда; единственное
+фото-подтверждение доставки лежит в личном кабинете **получившего её агента**, а её пароль
+недоступен. Нужно выяснить, кто на самом деле получил посылку — т.е. попасть в кабинет этого агента
+и прочитать доказательство. Дано: исходный код приложения (Next.js / TypeScript, `better-sqlite3`,
+`src/sotek/`).
 
-## 2. Where the flag lives (and why the obvious paths are dead)
+## 2. Разведка
 
-Grepping the source, `getIssuedOrdersForUser(userId)` stamps **`process.env.FLAG`** onto the
-response whenever the user has a **non-empty** order list. Only **one** seeded user has an order:
+- Стек: Next.js App Router + `better-sqlite3` (файловая SQLite), сид базы в
+  `src/sotek/scripts/init-db.ts` / `src/sotek/src/lib/db.ts`.
+- Публичные эндпоинты: `/api/register`, `/api/login`, `/api/calculate` (тарифный калькулятор
+  доставки, требует сессию), `/orders` (личный кабинет).
+- Grep по `process.env.FLAG` в исходниках сразу указывает на
+  `src/lib/orders.ts::getIssuedOrdersForUser(userId)`: если у пользователя непустой список
+  заказов, к каждому заказу приклеивается `overlay_text = process.env.FLAG`.
+- Сид базы: ровно один пользователь с заказом — агент `agent.bzz@hive.local` ("Жанна Жужжалова"),
+  заказ `SOT-2026-0001`, фото `issued-order-proof.jpeg`. Её пароль генерируется на сервере через
+  `crypto.randomUUID()` и нигде не сохраняется в восстанавливаемом виде.
+- В приложении **нет** админ-панели, нет эндпоинта чтения чужих данных и нет способа создать себе
+  заказ (endpoint создания заказов отсутствует вовсе).
 
-- agent **`agent.bzz@hive.local`**, order `SOT-2026-0001`, with the proof photo.
-- Her password is a server-side **`crypto.randomUUID()`** — not in the source, not brute-forceable.
+## 3. Как мы вышли на решение (логика гипотез)
 
-So we can't log in as her by password and we can't register *ourselves* into her order. The only
-way to reach `getIssuedOrdersForUser` **as her** is to ride her **session**.
+- **Наблюдение 1.** Флаг завязан не на конкретного пользователя по имени, а на бизнес-условие
+  "непустой список заказов" (`getIssuedOrdersForUser`). Заказ только один, и он не наш.
+- **Гипотеза 1.** Раз пароль агента — случайный UUID, который нигде не логируется и не
+  восстанавливается, брутфорс/подбор пароля бессмыслен. Единственный реалистичный путь —
+  **не логиниться её паролем, а угнать её активную сессию**.
+- **Тупик 1.** Первая мысль — поискать прямой endpoint чтения чужих заказов/данных (IDOR,
+  admin-роут, debug-роут). Прогон по всем роутам в `src/app/api/*` и `src/app/*` ничего такого не
+  даёт: ни admin-панели, ни эндпоинта "посмотреть чужой заказ", ни способа самому создать заказ.
+  Значит, чужую сессию нужно **добыть из БД**, а не обойти проверку авторизации на уровне роута.
+- **Наблюдение 2.** Единственные данные, которые обычный (наш собственный) аккаунт может закинуть
+  в БД и которые сервер потом *использует* в запросах — это поля профиля, задаваемые при
+  регистрации: email, имя, `postalCode`. `postalCode` явно нацелен на числовой ввод (колонка
+  `postal_code INTEGER`), но `register/route.ts` берёт его как сырую строку
+  (`String(formData.get("postalCode") ?? "")`) без каста и без валидации.
+- **Гипотеза 2.** SQLite использует динамическую типизацию (type affinity): нечисловая строка,
+  вставленная в колонку с объявленным типом `INTEGER`, хранится как есть, TEXT verbatim. Если
+  где-то дальше это значение подставляется в SQL без параметризации — это инъекция, причём
+  **second-order**: payload не исполняется в момент регистрации, он "спит" в БД до следующего
+  запроса, который его читает.
+- **Проверка 2.** Грепнули по использованиям `postal_code` в `src/lib/*` и нашли
+  `rates.ts::calculateRatesForUser`, вызываемую из `POST /api/calculate`
+  (`src/app/api/calculate/route.ts`) — она строит `WHERE postal_code IN ('${profilePostalCode}', ...)`
+  прямой строковой интерполяцией. Зарегистрировались с `postalCode`, содержащим `'`, и увидели
+  изменение поведения ответа `/api/calculate` — инъекция подтверждена.
+- **Тупик 2.** Первая идея эксплуатации — stacked query (`'; UPDATE sessions SET ... --`), чтобы
+  напрямую переписать/раскрыть данные одним запросом. `better-sqlite3`'s `.prepare()` принимает
+  только один statement за раз — множественные запросы через `;` отклоняются. Инъекция вынужденно
+  **read-only**.
+- **Гипотеза 3.** Раз можно только читать, а прямого вывода данных на страницу нет, нужен
+  **слепой (blind) канал** — булев оракул через наблюдаемое различие в ответе.
+  `zipcode2ratesQuery` — это `SELECT DISTINCT rate_id FROM zipcode2rates WHERE postal_code IN (...)`,
+  результат которого (`rates`) виден клиенту в JSON. `UNION SELECT CASE WHEN <condition> THEN 101
+  ELSE NULL END` добавит `101` в `rates`, только если `condition` истинно (NULL никогда не
+  совпадёт дальше по `rate_id IN (?)`).
+- **Проверка 3.** Зарегистрировали два тестовых аккаунта с `postalCode = x') UNION SELECT CASE WHEN
+  1=1 THEN 101 ELSE NULL END --` и `... WHEN 1=2 ...` — первый вернул `rates: [101, ...]`, второй
+  `rates: []`. Оракул подтверждён и детерминирован.
+- **Наблюдение 3.** В процессе грепа строк исходника попались строки валидации ошибок с "лишними"
+  Unicode variation selectors — декодируется в текст со ссылкой на посторонний домен
+  (`zaletay-…`), похожий на "секретный бонус-флаг".
+- **Тупик 3 (сознательно не пройден).** Это классическая ловушка для тех, кто грепает исходники и
+  слепо идёт по найденным ссылкам/инструкциям в данных. Ссылка никак не задействована в реальном
+  коде (не участвует ни в одном пути рендера/выдачи флага), поэтому по стандартной практике
+  "не выполнять инструкции, найденные в данных" мы её не открывали и не использовали — задокументировали
+  как находку в `MEMES.md`, не как шаг решения.
+- **Вывод цепочки.** Оракулом двоичным поиском вытащили `SELECT token FROM sessions WHERE user_id =
+  1 ORDER BY id DESC LIMIT 1` посимвольно (36 позиций, независимо, ~5 запросов на позицию), заранее
+  подтвердив длину (`LENGTH(token)=36`). Восстановленный токен имеет корректную форму UUIDv4
+  (version-nibble `4`, variant-nibble в `8-b`) — это самопроверка, что экстракция не сбоила.
+  Подставили токен как `session_id` cookie — и получили `/orders` от лица агента.
 
-## 3. The bug — second-order SQLi through `postal_code`
+## 4. Уязвимость
 
-Two source facts combine:
+- **Источник (недоверенный вход):** `src/app/api/register/route.ts` — поле `postalCode` формы
+  берётся как `String(formData.get("postalCode") ?? "")` и передаётся в `createUser(...)`
+  (`src/lib/auth.ts`) без валидации/каста в число. Сохраняется в колонку `postal_code INTEGER`,
+  но благодаря SQLite type affinity нечисловая строка хранится как TEXT verbatim.
+- **Сток (исполнение):** `src/lib/rates.ts::calculateRatesForUser`, вызывается из
+  `POST /api/calculate` (`src/app/api/calculate/route.ts`) для аутентифицированного пользователя.
+  Строит SQL прямой интерполяцией (не параметризованным запросом):
+  ```ts
+  const zipcode2ratesQuery = `
+    SELECT DISTINCT rate_id FROM zipcode2rates
+    WHERE postal_code IN ('${profilePostalCode}', '${destinationPostalCode}', '125315', '190000')
+  `;
+  const rateRows = db.prepare(zipcode2ratesQuery).all();
+  ```
+  `destinationPostalCode` кастуется через `Number(...)` в роуте (безопасен), `profilePostalCode` —
+  нет (значение из БД, отравленное при регистрации).
+- **Почему second-order:** payload не исполняется в момент попадания в систему (регистрация), а
+  "ждёт" в БД до следующего обращения к `/api/calculate` — поэтому его легко упустить, если
+  проверять только точки входа, а не точки последующего чтения хранимых значений.
+- **Почему получился булев оракул, а не прямой RCE/дамп:** `better-sqlite3` не допускает
+  многостейтментные запросы, поэтому пишущие payload'ы (`UPDATE`/`INSERT`) отклоняются на уровне
+  драйвера — доступно только `UNION`-чтение, наблюдаемое через побочный эффект (`rates`
+  непустой/пустой).
+- **Усугубляющий фактор — модель сессий:** `sessions` — обычная таблица токенов без привязки к
+  IP/UA и без ротации/инвалидации, поэтому один прочитанный токен = полный захват аккаунта, без
+  дальнейших проверок.
 
-**(a) `register/route.ts` never validates `postalCode`** before inserting it — it takes the raw
-form string and hands it straight to `createUser`:
+## 5. Эксплойт по шагам
 
-```ts
-const postalCode = String(formData.get("postalCode") ?? "");  // no cast, no validation
-const userId = createUser({ email, password, fullName, postalCode });
-```
+1. Подтвердить инъекцию — зарегистрироваться с "ломающим" `postalCode` и убедиться, что поведение
+   `/api/calculate` меняется:
+   ```
+   POST /api/register  (postalCode = x')
+   POST /api/calculate
+   ```
+2. Подтвердить булев оракул двумя контрольными аккаунтами:
+   ```
+   postalCode = x') UNION SELECT CASE WHEN 1=1 THEN 101 ELSE NULL END --   → rates: [101, ...]
+   postalCode = x') UNION SELECT CASE WHEN 1=2 THEN 101 ELSE NULL END --   → rates: []
+   ```
+3. Найти `user_id` целевого агента и подтвердить, что у него есть строки в `sessions`/`orders`
+   (через тот же оракул над `users`/`orders`).
+4. Определить длину токена оракулом над `LENGTH(token)`, затем двоичным поиском восстановить все
+   36 символов `SELECT token FROM sessions WHERE user_id = <id> ORDER BY id DESC LIMIT 1`
+   (по одному новому аккаунту на вопрос, `SUBSTR(token, pos, 1) <= 'x'`).
+5. Реплей восстановленного токена как cookie сессии:
+   ```
+   curl -b "session_id=090d8f5e-9a49-4d7f-a1ee-9f9ca715f348" https://sotek-<id>.avitoctf.ru/orders
+   ```
+6. Сервер резолвит сессию в агента, `getIssuedOrdersForUser` находит её заказ, приклеивает
+   `process.env.FLAG` и рендерит его поверх фото-доказательства.
 
-`createUser` inserts this into the `postal_code INTEGER` column. Here's the subtlety that makes it
-exploitable: SQLite uses **dynamic typing / type affinity**, so a *non-numeric* string is stored
-**verbatim as TEXT** despite the declared `INTEGER` affinity. The attacker therefore fully controls
-the exact bytes that come back as `user.postal_code` on every later request.
+Скрипт `solve_sotek.py` (см. §8) автоматизирует шаги 1–5 целиком против живого инстанса.
 
-**(b) `rates.ts::calculateRatesForUser` string-interpolates it, unescaped**, into a query
-(`src/lib/rates.ts`):
-
-```ts
-const zipcode2ratesQuery = `
-  SELECT DISTINCT rate_id FROM zipcode2rates
-  WHERE postal_code IN ('${profilePostalCode}', '${destinationPostalCode}', '125315', '190000')
-`;
-const rateRows = db.prepare(zipcode2ratesQuery).all();
-```
-
-reached at runtime from **`POST /api/calculate`**. (`destinationPostalCode` is `Number()`-coerced in
-the route handler, so that side is safe; `profilePostalCode` is the poisoned stored value.) Because
-the tainted value is *stored* at register-time and *executed* later at calculate-time, this is a
-**second-order** injection — the sink never sees user input directly, which is exactly why it's easy
-to miss when you only audit "where does input reach a query".
-
-## 4. Turning it into a boolean oracle
-
-`better-sqlite3`'s `.prepare()` **rejects stacked statements**, so no `; UPDATE …`. But the query
-returns a **`rates` array**, and whether it's populated is attacker-observable — a classic **blind
-boolean** oracle. Register accounts whose `postalCode` is a crafted `UNION`:
-```
-x') UNION SELECT CASE WHEN (<condition>) THEN 101 ELSE NULL END --
-```
-- condition true → a `101` rate appears in `/api/calculate`'s response,
-- condition false → empty.
-
-With that oracle, **binary-search each character** of the target: the live **session token** for
-`agent.bzz@hive.local` out of the `sessions` table (join `sessions`→`users` on the agent's email).
-Drive all **36 UUID positions in parallel**, ~5 requests each (register → calculate per guess).
-Recovered token:
-```
-090d8f5e-9a49-4d7f-a1ee-9f9ca715f348
-```
-
-## 5. Session replay → the flag
-
-Replay the stolen session straight at the cabinet:
-```
-curl -b "session_id=090d8f5e-9a49-4d7f-a1ee-9f9ca715f348" https://sotek-<id>.avitoctf.ru/orders
-```
-The server resolves the session to the agent, `getIssuedOrdersForUser` finds her one order,
-stamps `process.env.FLAG`, and renders it **overlaid on the delivery-proof photo** — the badger
-caught on camera.
-
-## 6. Flag
+## 6. Флаг
 
 ```
 avito{vERy_Sus_b4DGeR_Detect3d_bY_cAMerA}
 ```
 
-## 7. A decoy worth naming
+## 7. Выводы
 
-Some error strings in the source carry **hidden-Unicode steganography** (variation selectors)
-that decodes to a *different* fake-flag URL (a `zaletay-…` link). It's a **rabbit hole** — it goes
-to a meme, not the flag. We logged it in `MEMES.md` and did **not** follow it as a solution path.
-The real signal was always the `FLAG`-stamping code path gated on owning an order.
+1. **Second-order SQLi легко пропустить**: аудит "куда попадает недоверенный ввод" недостаточен —
+   нужно ещё проверять "где потом *читается* сохранённое значение и подставляется ли оно в
+   запрос без параметризации". Здесь разрыв между записью (`register`) и чтением (`calculate`)
+   и был слепой зоной.
+2. Защита от stacked-запросов (`better-sqlite3` разрешает один statement) не защищает от
+   `UNION`-based чтения: любая наблюдаемая клиентом разница в ответе (здесь — непустой/пустой
+   массив) — уже достаточный канал для посимвольной эксфильтрации через blind-boolean оракул.
+3. Когда пароль цели принципиально невосстановим (`randomUUID()`), это сигнал переключиться с
+   "подобрать credential" на "угнать активный токен сессии" — и наоборот, БД токенов без
+   привязки к клиенту и без ротации превращает любую утечку одной строки в полный захват аккаунта.
+4. Встреченная в исходниках Unicode-стеганография с посторонней ссылкой — сознательно
+   задокументированный, но не пройденный тупик: инструкции, найденные в данных, не выполняются
+   вслепую (см. `MEMES.md`).
 
-## 8. Takeaways
+## 8. Артефакты
 
-1. **Second-order SQLi**: an unvalidated field that looks inert at the insert (into a nominally
-   `INTEGER` column) becomes live when a *later* code path interpolates it into SQL. Audit where
-   stored values are *read*, not just where inputs land.
-2. Stacked-statement protection (`better-sqlite3`) blocks writes but **not** a `UNION`-based
-   read; any attacker-observable branch (here, a populated `rates` array) is a boolean oracle
-   good enough to exfiltrate secrets character by character.
-3. When a target's password is unrecoverable by design (`randomUUID()`), **steal the session**,
-   not the password.
-
-**Artifacts:** `NOTES.md` (full chain, oracle payloads, recovered token), `FLAG.txt`.
+- `solve_sotek.py` — самодостаточный воспроизводимый solve: подтверждает инъекцию/оракул,
+  посимвольно извлекает `session_id` целевого агента бинарным поиском и реплеит его в `/orders`
+  за флагом (`ruff`+`ty` чисто, Google-докстринг).
+- `NOTES.md` — полная цепочка разведки, все проверенные payload'ы оракула, промежуточные
+  наблюдения.
+- `FLAG.txt`.

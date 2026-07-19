@@ -12,8 +12,13 @@
 !.python-version
 !README.md
 !MEMES.md
+!WRITEUP_TEMPLATE.md
 !pyproject.toml
 !uv.lock
+
+# --- hidden-meme (easter-egg) report (images stay OUT of git; report is text) ---
+!memes/
+!memes/HIDDEN_EGGS_REPORT.md
 
 # --- task folders + their write-ups and briefs ---
 !task*/
@@ -21,8 +26,39 @@
 !task*/task.md
 
 # --- curated deliverable scripts (must pass ruff + ty) ---
+!task2/decode_ghost.py
+!task3/solve_task3.py
 !task4/solve_task4.py
+!task5/solve_task5.py
+!task6/solve_task6.py
 !task7/exploit_server.py
+!task8/solve_task8.py
+!task9/harness.py
+!task11/drv.py
+!task11/cdp.py
+!task12/session_server.py
+!task13/rce_exec.py
+!task13/pod_all.py
+!task13/pod_exec.py
+!task16/exploit.py
+!task17/bee.py
+!task18/s3list.py
+!task19/s3get.py
+!task20/agents/
+!task20/agents/username_flip_reopen/
+!task20/agents/username_flip_reopen/offset_sweep.py
+!task21/exploit2.py
+
+# --- named-task curated scripts (their dirs already re-included above) ---
+!beeca/recover_ca_and_forge.py
+!honeyleak/recover_secret.py
+!sotolet/solve_sotolet.py
+!sotek/solve_sotek.py
+!sotolambda/mkelf.py
+!honeyvault/exploit.py
+!botnet/solve_botnet.py
+!slophacking/exploit/
+!slophacking/exploit/inject_server.py
 
 # --- named (non-numbered) solved task folders: keep write-ups, notes, flags ---
 !beeca/

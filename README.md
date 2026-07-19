@@ -4,6 +4,11 @@
 `task.md`/условием и `*_writeup.md` (разбор с логикой «как дошёл»). Разборы написаны так, чтобы было
 видно **ход рассуждений**, а не только ответ.
 
+Единый формат разборов — в [`WRITEUP_TEMPLATE.md`](WRITEUP_TEMPLATE.md) (обязателен раздел §3 «как
+вышли на решение»). У каждой решённой задачи есть один выверенный solver-скрипт (`solve_*.py` или
+именной), проходящий `ruff` + `ty` (Google-style docstring). Скрытые «мемные» пасхалки —
+[`MEMES.md`](MEMES.md) + отчёт [`memes/HIDDEN_EGGS_REPORT.md`](memes/HIDDEN_EGGS_REPORT.md).
+
 **Легенда:** ✅ решено (флаг есть) · 🔧 метод готов, добор за тобой · ⏳ агент решает (живой инстанс) · ⛔ black-box выжат, нужен исходник/инсайт
 
 ## Статус задач
@@ -15,7 +20,7 @@
 | 2 | Ghost Font | стего | ✅ | `avito{SM4RT3R_TH4N_AI}` |
 | 3 | Сопромёд | сеть / pcap | ✅ | `avito{57Icky_p4WS_Mi55_thE_Bu7ToNS}` |
 | 4 | Сопромёд ч.2 | web / broken auth ordering | ✅ | `avito{0Tp_ch3ck3D_beF0R3_C4PtcH4_O0PS}` |
-| 5 | OnMute | web / regex lastIndex desync | 🔧 | метод готов: бот `/original 4` (флаг только с живого сервера) |
+| 5 | OnMute | web / regex lastIndex desync | ✅ | `avito{REg3X_FOr_51lENCE_5laSh_G_FOr_V10LENc3}` |
 | 6 | B2Bee | Java sandbox escape (reflection) | ✅ | `avito{juSt_34Sy_biG_DISCoUNt}` |
 | 7 | Pytome | Android WebView + deep-link | ✅ | `avito{pYThON_In_WEbv13w_1s_D4NGEroUs}` |
 | 8 | io_hrana | reversing (io_uring / окружение) | ✅ | `avito{tim3_1s_h0ney&hon3y_i5_7ime}` |
@@ -46,8 +51,8 @@
 | СотоLambda (`sotolambda/`) | reverse / misc (утечка root-fd `/etc/shadow`) | ✅ | `avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}` |
 | Сотолёт (`sotolet/`) | infra / web (ACL-байпас по raw-портам → pgAdmin) | ✅ | `avito{5ot0lE7_que3N_bEar1NG}` |
 
-**Итого:** 28 задач в таблице · ✅ **25 решено с подтверждённым флагом** (17 пронумерованных + 8
-именованных) · 🔧 2 метод-готовых (task5, task10) · ⛔ 1 black-box выжат (task9).
+**Итого:** 28 задач в таблице · ✅ **26 решено с подтверждённым флагом** (18 пронумерованных + 8
+именованных) · 🔧 1 метод-готовая (task10) · ⛔ 1 black-box выжат (task9).
 
 - Цепочка **Brainwash 13→14→15** пройдена целиком: AimQL-RCE → права `ci-runner` → ephemeral
   container → CSR `proxyman/node-proxymen` → kubelet WebSocket через привилегированный hostPath-под.
@@ -60,7 +65,6 @@
   восстанавливается с публичной поверхности (нет исходника; `Access granted!` не захвачен). Нужен
   исходник/утечка round function — тогда добор быстрый. Разбор честно отражает это в
   `task10/mayes_task10_writeup.md`.
-- **task5** — прогони `/original 4` через бота OnMute (`task5/onmute_task5_writeup.md`).
 - **task9** ⛔ — модель `build_raw` восстановлена и pickle-сток закрыт на каждой ветке с
   доказательством (см. `task9/nagibator_task9_writeup.md` / `task9/WRITEUP.md`); внешняя поверхность
   выжата — нужен новый источник данных или структурный инсайт.
