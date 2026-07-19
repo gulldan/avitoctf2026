@@ -11,6 +11,7 @@
 !.gitignore
 !.python-version
 !README.md
+!MEMES.md
 !pyproject.toml
 !uv.lock
 
@@ -22,3 +23,29 @@
 # --- curated deliverable scripts (must pass ruff + ty) ---
 !task4/solve_task4.py
 !task7/exploit_server.py
+
+# --- named (non-numbered) solved task folders: keep write-ups, notes, flags ---
+!beeca/
+!beeca/*.md
+!beeca/FLAG.txt
+!botnet/
+!botnet/*.md
+!botnet/FLAG.txt
+!honeyleak/
+!honeyleak/*.md
+!honeyleak/FLAG.txt
+!honeyvault/
+!honeyvault/*.md
+!honeyvault/FLAG.txt
+!slophacking/
+!slophacking/*.md
+!slophacking/FLAG.txt
+!sotek/
+!sotek/*.md
+!sotek/FLAG.txt
+!sotolambda/
+!sotolambda/*.md
+!sotolambda/FLAG.txt
+!sotolet/
+!sotolet/*.md
+!sotolet/FLAG.txt
