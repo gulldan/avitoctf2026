@@ -25,7 +25,7 @@
 | 7 | Pytome | Android WebView + deep-link | ✅ | `avito{pYThON_In_WEbv13w_1s_D4NGEroUs}` |
 | 8 | io_hrana | reversing (io_uring / окружение) | ✅ | `avito{tim3_1s_h0ney&hon3y_i5_7ime}` |
 | 9 | Нагибатор | web / pickle deserialization | ⛔ | Модель `build_raw` полностью реверснута (base64-char-deletion → сдвиг строкового операнда `g2`). Сток `pickle.loads(raw)` (backend.py) реален, но **закрыт на каждой ветке с доказательством**: хвост после строки — фикс. `71 <memo> 65 2e`, трейлер даёт только non-consuming opcodes (0x40/0x41/0x42, не `R`/`c`); memo ≤ 9 (REDUCE нужен 72, GLOBAL 140); длина строго `len(utf8(extra))` — нет расцепления длины/спилла; Werkzeug `errors='replace'` → U+FFFD-стена; padding-байпас структурно недостижим (индекс удаления всегда внутри спана ключевого слова). Hard, единичные решения; интендед-путь с публичной поверхности не найден |
-| 10 | Майя / Майес | crypto (пословный SPN, «AES без ShiftRows») | 🔧 | метод готов (оффлайн word-wise брут 2³² по login-оракулу); `Access granted!`/флаг **не захвачен** — раунд-функция не восстановлена с публичной поверхности |
+| 10 | Майя / Майес | crypto (модулярный mod-256 шифр, не GF(2) SPN) | ✅ | `avito{M4Y35_is_GO0d_BuT_a3S_IS_Bet73r}` |
 | 11 | Government | web / broken access control | ✅ | `avito{hoN3Y_BAdgERS_allOwEd_1N_beehIVe_N0w}` |
 | 12 | Undercover | Linux privesc (cron→SGID→OTP-mail) | ✅ | `avito{the_OP3ra7I0n_wAS_suCce5sfuL}` |
 | 13 | Brainwash | web / AimQL RCE (CVE-2024-2195) | ✅ | `avito{3Xperim3n7s_aR3_unREL1aBl3_BU7_rcE_N3V3R_liEs}` |
@@ -50,24 +50,43 @@
 | СОТЭК (`sotek/`) | web / second-order SQLi → session takeover | ✅ | `avito{vERy_Sus_b4DGeR_Detect3d_bY_cAMerA}` |
 | СотоLambda (`sotolambda/`) | reverse / misc (утечка root-fd `/etc/shadow`) | ✅ | `avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}` |
 | Сотолёт (`sotolet/`) | infra / web (ACL-байпас по raw-портам → pgAdmin) | ✅ | `avito{5ot0lE7_que3N_bEar1NG}` |
+| Медовая ловушка (`ebee/`) | forensics / Linux (eBPF-руткит keylogger, RAM-дамп) | ✅ | `avito{eBeepf_is_awes8me_4_ev3ryth1ng}` |
+| Медофильтр (`filter/`) | net / Go DPI-файрвол (краш-триггер → fail-open) | ✅ | `avito{ge7_in_Queu3_F0r_h0N3y!}` |
+| Медофильтр 2 (`filter2/`) | net / Go DPI-файрвол (тот же баг, идентичный код) | ✅ | `avito{NEv3R_goNn4_G3T_In_qU3Ue_fOR_HonEY_7wiCE!}` |
+| НаПасеке (`napaseke/`) | crypto: XMSS^MT / MD5 WOTS+ one-time-key reuse | ✅ | `avito{pCh3loV_VerN1_57ENU!!!!}` |
+| notrespassing (`notrespassing/`) | web / PHP session-key reuse → password-reset takeover | ✅ | `avito{yOuROWnCLoUD_BuT_no7_Your_0wn_fILes}` |
+| Возвратов.net (`returns/`) | AI / n8n prompt-injection (Лев→Underwriter→Медоед) | 🔧 | пайплайн реверснут целиком, эксплойт готов; блок — application-level reCAPTCHA на `/api/ticket`, нужен твой клик с чистой сети |
+| david (`david/`) | pwn / Python↔WASM unchecked `data_ptr()` OOB read | ✅ | `avito{honey_badger_does_not_check_bounds_cf9ff3558ae0277f}` |
+| Goliath (`goliath/`) | pwn / тот же баг + arb R/W→RCE до хостового `/flag` | 🔧 | цепочка arb-R/W доказана локально; RCE-финиш добирается на live-инстансе |
+| Полба (`polba/`) | AI / LLM guardrail bypass (Unicode tag-chars smuggling) | ✅ | `avito{M3d0YED_Bez_meda_kAK_ryBa_bEz_V0dy}` |
+| Медофанс (`medofans/`) | web / PHP SSRF (NUL-byte `getaddrinfo` truncation) → rogue-MySQL `LOCAL INFILE` | 🔧 | примитив доказан и цепочка оттестирована; блок — нужен внешний публичный `:3306` (VPS), см. §6 райтапа |
+| НаПасеке v2 (`napasekev2/`) | crypto: PQC (XMSS-MD5), TOCTOU-гонка на shared WOTS+-ключе | 🔧 | уязвимость доказана офлайн (эталонная реализация, проверена байт-в-байт); статистическая гонка дошла до ~97% совокупной вероятности за ~13ч на 5 инстансах, но не выпала до конца соревнования — флаг не захвачен |
 
-**Итого:** 28 задач в таблице · ✅ **26 решено с подтверждённым флагом** (18 пронумерованных + 8
-именованных) · 🔧 1 метод-готовая (task10) · ⛔ 1 black-box выжат (task9).
+**Итого:** 38 задач в таблице · ✅ **34 решены с подтверждённым флагом** (19 пронумерованных + 15
+именованных) · 🔧 4 метод-готовые, флаг не захвачен (returns, Goliath, Медофанс, НаПасеке v2) ·
+⛔ 1 black-box выжат (task9). **Соревнование завершилось** — доборы по 🔧-задачам больше не
+проводятся (не засчитаются), финальный статус зафиксирован как есть.
 
 - Цепочка **Brainwash 13→14→15** пройдена целиком: AimQL-RCE → права `ci-runner` → ephemeral
   container → CSR `proxyman/node-proxymen` → kubelet WebSocket через привилегированный hostPath-под.
 - Одна SSRF-дыра в **МёдХантере** (импорт резюме по URL → IMDSv1 → IAM → private registry) прокачала
   сразу три задачи: **task18** (invite), **task19** (золотая звезда), **task21** (секрет подписи).
 
-## За тобой (быстрые доборы)
+## Что осталось нерешённым (финальный статус, доборы не проводятся)
 
-- **task10** — метод (пословный оффлайн-брут 2³² по login-оракулу) готов, но раунд-функция шифра не
-  восстанавливается с публичной поверхности (нет исходника; `Access granted!` не захвачен). Нужен
-  исходник/утечка round function — тогда добор быстрый. Разбор честно отражает это в
-  `task10/mayes_task10_writeup.md`.
 - **task9** ⛔ — модель `build_raw` восстановлена и pickle-сток закрыт на каждой ветке с
   доказательством (см. `task9/nagibator_task9_writeup.md` / `task9/WRITEUP.md`); внешняя поверхность
-  выжата — нужен новый источник данных или структурный инсайт.
+  была выжата полностью, интендед-путь с публичной поверхности не найден.
+- **returns** — весь n8n-пайплайн реверснут, эксплойт готов; не хватило прохождения application-level
+  reCAPTCHA до конца соревнования.
+- **Медофанс** — SSRF-примитив доказан и цепочка (rogue-MySQL → `LOCAL INFILE`) оттестирована; не
+  хватило внешнего хоста с публичным `:3306` для доставки.
+- **Goliath** — arb-R/W примитив доказан и подтверждён на живом инстансе по HTTP; RCE-финиш до
+  хостового `/flag` не завершён (упёрлись в защитный фильтр модели на плотной exploit-dev
+  терминологии при попытке офлайн-подготовки — см. `goliath/goliath_writeup.md` §6).
+- **НаПасеке v2** — уязвимость (TOCTOU-гонка на shared WOTS+-ключе) доказана офлайн и подтверждена
+  байт-в-байт; статистическая гонка дошла до ~97% совокупной вероятности за ~13ч, но не выпала до
+  конца соревнования.
 
 ## Заметки
 - Все разборы также опубликованы приватными артефактами на claude.ai (ссылки в переписке).
