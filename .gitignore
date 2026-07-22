@@ -1,36 +1,36 @@
 # ==========================================================================
-# Curated CTF write-ups repo.
-# Strategy: ignore EVERYTHING, then re-include exactly what we keep —
-# write-ups (.md), task briefs, curated scripts, and repo config.
-# Agent scratch, binaries, extracted trees, venvs, captures, one-time secrets,
-# and archives (except one exact 20 KiB Goliath fixture) stay OUT of git.
+# Curated CTF technical reports repository.
+# Ignore by default, then include reports, task briefs, reproducible solvers,
+# minimal input/result fixtures, and root project configuration.
+# Scratch files, virtual environments, dumps, nonessential captures, credentials, extracted
+# trees, and archives (except the required Goliath fixture) stay out of git.
 # ==========================================================================
 *
 
 # --- repo config / metadata ---
-!.gitignore
-!.python-version
-!README.md
-!MEMES.md
-!WRITEUP_TEMPLATE.md
-!WRITEUP_STYLE_FOR_TEACHING.md
-!pyproject.toml
-!uv.lock
+!/.gitignore
+!/.python-version
+!/README.md
+!/MEMES.md
+!/WRITEUP_TEMPLATE.md
+!/pyproject.toml
+!/uv.lock
 
-# --- hidden-meme (easter-egg) report (images stay OUT of git; report is text) ---
-!memes/
+# --- Unicode-steganography report and scanner (images stay OUT of git) ---
+!/memes/
 !memes/HIDDEN_EGGS_REPORT.md
+!memes/meme_scan.py
 
 # --- task folders + their write-ups and briefs ---
-!task*/
+!/task*/
 !task*/*_writeup.md
 !task*/task.md
-!returns/
+!/returns/
 !returns/*_writeup.md
 !returns/task.md
 !returns/FLAG.txt
 
-# --- curated deliverable scripts (must pass ruff + ty) ---
+# --- reproducible solver entry points and required support files ---
 !task10/solve.py
 !task10/mayes_spec.json
 !ebee/solve_ebee.py
@@ -121,7 +121,7 @@ task17/beesix/*
 !task20/agents/username_flip_reopen/offset_sweep.py
 !task20/agents/username_flip_reopen/fetch_flag.py
 
-# --- named-task curated scripts (their dirs already re-included above) ---
+# --- named-task solver entry points ---
 !beeca/recover_ca_and_forge.py
 !honeyleak/recover_secret.py
 !sotolet/solve_sotolet.py
@@ -135,39 +135,39 @@ task17/beesix/*
 !slophacking/exploit/inject_server.py
 !slophacking/exploit/redeploy.sh
 
-# --- named (non-numbered) solved task folders: keep write-ups, notes, flags ---
-!beeca/
+# --- named-task reports and minimal result/input fixtures ---
+!/beeca/
 !beeca/*_writeup.md
 !beeca/FLAG.txt
-!botnet/
+!/botnet/
 !botnet/*_writeup.md
 !botnet/FLAG.txt
-!ebee/
+!/ebee/
 !ebee/*_writeup.md
 !ebee/FLAG.txt
-!filter/
+!/filter/
 !filter/*_writeup.md
 !filter/FLAG.txt
-!filter2/
+!/filter2/
 !filter2/*_writeup.md
 !filter2/FLAG.txt
-!napaseke/
+!/napaseke/
 !napaseke/*_writeup.md
 !napaseke/FLAG.txt
-!notrespassing/
+!/notrespassing/
 !notrespassing/*_writeup.md
 !notrespassing/FLAG.txt
 !notrespassing/src/
-!david/
+!/david/
 !david/*_writeup.md
 !david/FLAG.txt
-!goliath/
+!/goliath/
 !goliath/*_writeup.md
 !goliath/FLAG.txt
-!polba/
+!/polba/
 !polba/*_writeup.md
 !polba/FLAG.txt
-!napasekev2/
+!/napasekev2/
 !napasekev2/*_writeup.md
 !napasekev2/FLAG.txt
 !napasekev2/solve/
@@ -176,25 +176,26 @@ task17/beesix/*
 !napasekev2/solve/forge_grind_R.py
 !napasekev2/solve/xmss_md5.py
 !napasekev2/solve/selftest.py
-!honeyleak/
+!/honeyleak/
 !honeyleak/*_writeup.md
 !honeyleak/FLAG.txt
-!honeyvault/
+!/honeyvault/
 !honeyvault/*_writeup.md
 !honeyvault/FLAG.txt
-!slophacking/
+!/slophacking/
 !slophacking/*_writeup.md
+!slophacking/SLOPHACKING_WRITEUP.md
 !slophacking/FLAG.txt
-!sotek/
+!/sotek/
 !sotek/*_writeup.md
 !sotek/FLAG.txt
-!sotolambda/
+!/sotolambda/
 !sotolambda/*_writeup.md
 !sotolambda/FLAG.txt
-!sotolet/
+!/sotolet/
 !sotolet/*_writeup.md
 !sotolet/FLAG.txt
-!medofans/
+!/medofans/
 !medofans/*_writeup.md
 !medofans/FLAG.txt
 !medofans/*.json

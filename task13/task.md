@@ -25,10 +25,10 @@
 3. сохранить вывод команды в параметре созданного Run и прочитать его через обычный API;
 4. извлечь `avito{...}` из `/flag.txt`.
 
-Подробный разбор всей цепочки task13–task15 находится в
-[`brainwash_task13_writeup.md`](brainwash_task13_writeup.md). Для следующих этапов есть
-отдельные разборы в [`../task14/brainwash_task14_writeup.md`](../task14/brainwash_task14_writeup.md)
-и [`../task15/brainwash_task15_writeup.md`](../task15/brainwash_task15_writeup.md).
+Технический разбор этого этапа находится в
+[`brainwash_task13_writeup.md`](brainwash_task13_writeup.md). Следующие этапы описаны отдельно в
+[`../task14/brainwash_task14_writeup.md`](../task14/brainwash_task14_writeup.md) и
+[`../task15/brainwash_task15_writeup.md`](../task15/brainwash_task15_writeup.md).
 
 ## Воспроизведение
 

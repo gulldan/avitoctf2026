@@ -1,95 +1,155 @@
-# Brainwash — task15 «Тотальное доминирование над кластером» — разбор
+# Brainwash, часть 3 — технический разбор
 
 **Флаг:** `avito{Learn_Th3_ORCh3S7r4TioN_Not_The_ind0ctr1n4t1on}`
-**Класс:** захват Kubernetes (самоодобрение сертификата → kubelet → привилегированный под с hostPath → root на ноде) · **Сложность:** Hard (финальный этап цепочки 13→14→15) · **Очки:** н/д · **Решило команд:** н/д
-**Автор:** @abreeva (SPbCTF)
 
-> **Это финальный этап единой цепочки Brainwash (13 → 14 → 15) на одной мишени.**
-> Полный разбор всей цепочки — с логикой гипотез, разведкой и тупиками — в
-> [`../task13/brainwash_task13_writeup.md`](../task13/brainwash_task13_writeup.md)
-> (этап task15 — раздел §5).
-> Здесь — самостоятельный, но сжатый разбор именно этого этапа.
+**Класс:** Kubernetes privilege escalation / service account token theft / CSR self-approval /
+admission webhook / kubelet WebSocket exec / privileged `hostPath`
 
-## В двух словах (без терминов)
+## Краткое техническое резюме
 
-К этому моменту мы уже умеем подсаживать «курьера» в чужую коробку (task14). Тем же трюком крадём не секрет, а **чужой пропуск** — пропуск учётки помощнее нашей. У этого пропуска есть редкое право: он может **сам себе выписывать именные пропуска** (сертификаты).
+Начальная позиция — права `ci-runner` на `pods/ephemeralcontainers patch`, подтверждённые в task14.
+Ephemeral container в pod `cert-agent` извлекает projected token service account
+`cert-manager-sa` через termination message. Эта identity может создавать и самостоятельно
+одобрять client CSR.
 
-Мы пробуем выписать себе пропуск «главного администратора» — но на входе стоит сторож, который затирает имя в нашей заявке и выдаёт вместо «администратора» скромную роль «смотрителя». Ладно, берём и её. Оказывается, «смотрителю» разрешено разговаривать с **управляющим агентом самой машины** (это тот, кто реально запускает контейнеры). Через него мы находим одну «коробку без стенок» — привилегированный контейнер, которому виден **весь диск машины целиком**. Заходим в него — и оказываемся администратором всей машины. Читаем финальный флаг и заодно мастер-ключ от всего кластера.
+CSR с `O=system:masters` проходит admission webhook, но subject переписывается в
+`CN=proxyman, O=node-proxymen`. Полученный certificate разрешает `nodes/proxy get` и принимается
+kubelet. Прямой WebSocket exec через kubelet `:10250` выполняет команду в privileged pod
+`kube-system/log-collector`, где root filesystem node смонтирована в `/host`. Чтение
+`/host/flag.txt` возвращает flag3.
 
----
+## 1. Контекст и цель
 
-## 1. Что за задача
+Целевой Kubernetes cluster использует k3s. В namespace `brainwash-mlops` pod `cert-agent` работает
+от `cert-manager-sa` и содержит projected service account token volume. `ci-runner` не может читать
+этот token напрямую, но может добавлять ephemeral containers в pod.
 
-Финальный этап цепочки Brainwash (та же цель, раздел `brainwash-mlops`, кластер k3s). Легенда: «путь к тотальному доминированию над промывателями мозгов» — захватить машину-ноду целиком; финальный флаг — за полный контроль над инфраструктурой.
+Цель — перейти от namespace-scoped access к root на node. Полная предшествующая цепочка описана в
+[`../task13/brainwash_task13_writeup.md`](../task13/brainwash_task13_writeup.md), extraction primitive
+task14 — в [`../task14/brainwash_task14_writeup.md`](../task14/brainwash_task14_writeup.md).
 
-> Мини-словарь. **Kubernetes** («кубер») — «диспетчер» контейнеров. **Нода (node)** — физическая или виртуальная машина, на которой кубер запускает контейнеры. **root** — всемогущий администратор внутри операционной системы.
+## 2. Reconnaissance и attack surface
 
-## 2. Разведка — что у нас уже есть
+Из pod specification `cert-agent` извлекаются имя projected volume и service account
+`cert-manager-sa`. Ephemeral container монтирует этот volume в `/sa` и копирует `/sa/token` в
+termination message.
 
-Стартовая точка — из task14: у нас есть право `ephemeralcontainers patch` (подсаживать «курьера» в чужой под) от учётки `ci-runner`, и есть соседний под `cert-agent`, у которого смонтирован **собственный пропуск** учётки `cert-manager-sa`. Цель этого этапа — из ограниченной учётки дорасти до контроля над всей нодой.
+RBAC для украденного token разрешает:
 
-## 3. Как мы дошли до решения
+- `create` на `certificatesigningrequests.certificates.k8s.io`;
+- `update` approval subresource;
+- signer `kubernetes.io/kube-apiserver-client`.
 
-- **Наблюдение.** У `cert-agent` смонтирован его собственный «пропуск» `cert-manager-sa`, а прав у этой учётки заметно больше, чем у нашей `ci-runner`.
-- **Проверка.** Тем же приёмом с отладочным контейнером (`../task13/pod_sa.py`) выгружаем `cat /sa/token` в «записку при выходе» → получаем токен `cert-manager-sa`. Его права: `create` + `approve` для заявок на сертификат (CSR) с подписантом `kubernetes.io/kube-apiserver-client` — то есть эта учётка может **сама себе выписать клиентский пропуск**.
+Первоначальный CSR запрашивает subject `O=system:masters`. Mutating/validating admission component
+`csr-subject.brainwash.local` заменяет subject на `CN=proxyman, O=node-proxymen`. Effective access
+нового certificate ограничен `nodes/proxy get`, но включает kubelet-facing API.
 
-> Мини-словарь. **CSR** (Certificate Signing Request) — «заявка на сертификат»: присылаешь свой открытый ключ и просишь подписать — получаешь именной пропуск. **`create` + `approve` на CSR** — можно и подать заявку, и самому её одобрить (как если бы паспорт себе выдавал ты сам, без паспортного стола).
+Kubelet pod inventory содержит `kube-system/log-collector` со следующей конфигурацией:
 
-- **Тупик №4.** Заявка с именем `O=system:masters` (`../task13/build_csr.py` / `../task13/pod_csr.py`) — классический путь в администраторы кластера. Но на кластере стоит сторожевой **webhook** `csr-subject.brainwash.local`, который **принудительно переписывает имя** в одобряемой заявке на `CN=proxyman, O=node-proxymen`. Путь в администраторы закрыт — но не правами, а именно этим сторожем.
+```yaml
+securityContext:
+  privileged: true
+  runAsUser: 0
+volumeMounts:
+  - name: host-root
+    mountPath: /host
+volumes:
+  - name: host-root
+    hostPath:
+      path: /
+```
 
-> Мини-словарь. **Admission webhook** — «сторож на входе»: проверяет и при желании переписывает каждый запрос к кластеру перед тем, как его принять. Здесь он затирает имя в наших заявках.
+## 3. Анализ и проверка гипотез
 
-- **Работаем с тем, что дают.** Полученный сертификат `proxyman` имеет всего одно право — `nodes/proxy get` (доступ к «управляющему агенту» ноды). Никакого администраторства. Гипотеза: даже этого хватит, чтобы через агента ноды дотянуться до привилегированного контейнера и выйти на саму машину.
-- **Проверка.** Через `nodes/proxy` (`../task13/pod_kubelet.py`) видим все поды ноды, среди них — **`kube-system/log-collector`**: `privileged: true`, работает от root (`runAsUser: 0`), и в него смонтирован **весь корень хоста** (`hostPath: /` в `/host`). Это подтвердил `../task13/pod_priv.py`, разобрав настройки каждого пода.
+Token theft повторяет task14, но целевым volume является projected service account token, а command
+имеет вид `cat /sa/token > /dev/termination-log`.
 
-> Мини-словарь. **kubelet** — «управляющий агент» на каждой ноде: именно он запускает и держит контейнеры на этой конкретной машине; слушает порт `:10250`. **`nodes/proxy`** — путь через диспетчерскую, позволяющий поговорить с этим агентом. **Привилегированный под** — контейнер, с которого сняли почти все ограничения безопасности. **hostPath** — монтирование куска диска самой ноды внутрь контейнера; `hostPath: /` = контейнер видит **весь диск машины**.
+Solver использует включённые в скрипт ECDSA private key и соответствующий CSR для
+`kubernetes.io/kube-apiserver-client`, создаёт объект CSR, добавляет condition `Approved` и ожидает
+`status.certificate`. Admission webhook не выдаёт
+`system:masters`, однако сертификат `proxyman` достаточен для kubelet authentication/authorization.
 
-- **Деталь.** Заход (exec) через путь `nodes/proxy` диспетчерской **обрезает параметры запроса** — теряется сама команда. Поэтому WebSocket-заход бьём **напрямую в kubelet на `<hostIP>:10250`** тем же сертификатом `proxyman`.
+`GET /api/v1/nodes/<node>/proxy/pods` используется для pod inventory. Exec через API server proxy
+не сохраняет требуемые command query parameters. Поэтому solver устанавливает прямое mutual TLS
+соединение с `<hostIP>:10250` и выполняет WebSocket upgrade к kubelet exec endpoint с subprotocol
+`v4.channel.k8s.io`.
 
-**Бытовая аналогия «сердцевины».** Ты хотел выписать себе пропуск «директор», но охрана на входе затирает должность и штампует «уборщик». Не беда: оказывается, уборщику выдают ключ от подсобки, а в подсобке стоит служебный лифт без ограничений, который ходит во все помещения здания, включая директорский кабинет. «Слабый» ключ уборщика оказался достаточным, потому что рядом с ним лежала возможность посильнее, о которой никто не подумал.
+Privileged `log-collector` не обеспечивает container boundary относительно host: `/host` содержит
+полную filesystem node, включая `/host/flag.txt` и `/host/etc/rancher/k3s/k3s.yaml`.
 
-## 4. В чём именно ошибка (суть уязвимости)
+## 4. Корневая причина
 
-Опасна именно **связка**: избыточные права `cert-manager-sa` (сама создаёт и сама одобряет заявки на сертификат) + сторожевой webhook, который **сужает** имя, но не запрещает получить рабочий клиентский сертификат с правом `nodes/proxy` + привилегированный под `log-collector` с `hostPath: /`. «Слабого» сертификата достаточно как трамплина: доступ к kubelet → заход в привилегированный под → root на ноде → чтение любых файлов, включая мастер-ключ кластера.
+1. `ci-runner` может добавлять ephemeral containers в target pod и читать его projected credentials.
+2. `cert-manager-sa` совмещает CSR issuance и approval, нарушая separation of duties.
+3. Admission webhook изменяет subject, но результирующая роль `node-proxymen` всё ещё предоставляет
+   доступ к sensitive kubelet API.
+4. Kubelet `10250` сетево доступен из workload network и принимает выданный client certificate.
+5. Privileged pod с `hostPath: /` предоставляет прямой host filesystem access.
 
-Разработчик закрыл «парадную дверь» (`system:masters` через webhook) и решил, что эскалация невозможна. Но webhook сузил привилегию, а не устранил её — оставшийся «ослабленный» сертификат оказался достаточным.
+Комбинация этих misconfigurations преобразует namespace-level RBAC permission в node compromise и
+доступ к cluster-admin kubeconfig.
 
-## 5. Эксплойт по шагам
+## 5. Эксплуатация
 
-1. Тем же приёмом с отладочным контейнером (`../task13/pod_sa.py`) крадём токен `cert-manager-sa` из смонтированного пропуска пода `cert-agent`:
-   ```python
-   patch["spec"]["ephemeralContainers"][0]["command"] = ["sh", "-c", "cat /sa/token > /dev/termination-log 2>&1; sleep 2"]
-   ```
-2. Создаём заявку на сертификат (ключ на эллиптической кривой) → сами же её одобряем правами `cert-manager-sa` → забираем сертификат `CN=proxyman, O=node-proxymen` (`../task13/pod_mint.py`).
-3. С сертификатом `proxyman` через `/api/v1/nodes/{node}/proxy/pods` (`../task13/pod_kubelet.py`) находим `kube-system/log-collector` (привилегированный, `hostPath: /` → `/host`).
-4. WebSocket-заход **напрямую в kubelet** `<hostIP>:10250` (`../task13/pod_exec.py`):
-   ```
-   GET /exec/kube-system/log-collector-.../collector?command=sh&command=-c&command=<cmd>&output=1&error=1&tty=0
-   Upgrade: websocket
-   Sec-WebSocket-Protocol: v4.channel.k8s.io
-   ```
-5. Внутри `log-collector` (root, весь диск ноды виден как `/host`): `cat /host/flag.txt` → **flag3**. Заодно читаем `/host/etc/rancher/k3s/k3s.yaml` — это мастер-ключ от всего кластера (kubeconfig с правами `system:masters`): буквальное тотальное доминирование, а не только флаг.
+Последовательность API operations:
+
+1. Добавить ephemeral container в `cert-agent` и извлечь `cert-manager-sa` token.
+2. Создать CSR с signer `kubernetes.io/kube-apiserver-client`.
+3. Обновить `/approval` и получить certificate `proxyman`.
+4. Получить kubelet pod inventory и определить `hostIP`, pod и container `log-collector`.
+5. Выполнить прямой WebSocket exec на kubelet:
+
+```http
+GET /exec/kube-system/<log-collector-pod>/<container>?command=sh&command=-c&command=cat%20/host/flag.txt&output=1&error=1&tty=0
+Host: <hostIP>
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Protocol: v4.channel.k8s.io
+```
+
+End-to-end solver запускается внутри Aim pod, где доступны token `ci-runner` и cluster CA:
+
+```bash
+python3 /tmp/solve_task15.py
+```
+
+Локальный self-test:
+
+```bash
+uv run python task15/solve_task15.py --self-test
+```
+
+Для дополнительного подтверждения host compromise:
+
+```bash
+cat /host/etc/rancher/k3s/k3s.yaml
+```
+
+Этот kubeconfig содержит client credentials с `system:masters`.
 
 ## 6. Флаг
 
-```
+```text
 avito{Learn_Th3_ORCh3S7r4TioN_Not_The_ind0ctr1n4t1on}
 ```
 
-## 7. Мораль — какой это урок
+## 7. Выводы и рекомендации
 
-- **Право «сам подаю и сам одобряю сертификаты» — прямая дорога к эскалации.** Одобрение должно быть **отделено** от запроса: тот, кто просит пропуск, не должен его же и подписывать (принцип «двух ключей»). Здесь одна учётка делала и то, и другое.
-- **Сторож, который переписывает заявку, — это сужение привилегии, а не её устранение.** Разработчик закрыл очевидный путь в `system:masters`, но оставил «ослабленный» сертификат `nodes/proxy` — а его хватило до kubelet и до root на ноде. Как надо: либо вообще не выдавать право самоодобрения, либо тщательно ограничивать, во что может превратиться даже «слабый» сертификат.
-- **Привилегированного пода с `hostPath: /` в кластере быть не должно.** Такой контейнер — это «дыра прямо в диск машины»: кто в него зашёл, тот администратор ноды. Если он нужен по делу — доступ к нему должен охраняться строже всего остального.
-- **Практический урок про прокси.** Штатный путь `nodes/proxy` обрезал параметры запроса — но прямое обращение к kubelet `:10250` тем же пропуском сработало. Если «как положено» не работает, попробуй тот же доступ напрямую к нижнему сервису.
+- Разделять `create` и `approve` для CSR между независимыми principals; ограничивать signerName,
+  usages, subject и lifetime certificate.
+- Проверять effective permissions после admission mutation: subject rewrite не является достаточным
+  containment, если результирующая identity имеет kubelet access.
+- Закрыть kubelet `10250` network policy/firewall и использовать API server proxy с минимальным RBAC.
+- Исключить privileged workloads и `hostPath: /`; применять Pod Security Standards `restricted`.
+- Запретить namespace-wide ephemeral-container injection для CI service accounts.
+- Аудитировать выдачу client certificates и обращения к kubelet `/pods` и `/exec`.
 
-## 8. Файлы в папке
+## 8. Файлы для воспроизведения
 
-- `solve_task15.py` — самостоятельная полная цепочка **flag3** на stdlib: кража projected-токена
-  `cert-manager-sa` через ephemeral container, создание/самоодобрение CSR, получение переписанного
-  webhook'ом сертификата `proxyman`, прямой TLS-запрос к kubelet, поиск privileged hostPath-пода и
-  WebSocket-exec для чтения host-флага. Запускается внутри Aim-пода как
-  `python3 /tmp/solve_task15.py`; локальная проверка парсинга/поиска:
-  `uv run python task15/solve_task15.py --self-test`.
-- [`../task13/rce_exec.py`](../task13/rce_exec.py) — канал task13 для доставки и запуска решателя в поде.
-- Полный разбор всей цепочки и остальные артефакты — [`../task13/brainwash_task13_writeup.md`](../task13/brainwash_task13_writeup.md) (§5 и §8).
+Version-controlled artifacts:
+
+- `task15/solve_task15.py` — полный token → CSR → certificate → kubelet → hostPath solver.
+- [`../task13/pod_exec.py`](../task13/pod_exec.py) — kubelet WebSocket exec implementation.
+
+Точечные stage probes для token extraction, CSR и kubelet discovery не входят в
+version-controlled набор; их логика объединена в `task15/solve_task15.py`.

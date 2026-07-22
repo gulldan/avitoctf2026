@@ -1,99 +1,80 @@
-# Скрытые пасхалки Avito CTF 2026 — отчёт «мы их нашли» 🐝🚩
+# Reward-эндпоинты и медиа-артефакты
 
-Кому: оргкоманде (SPbCTF / Avito). Что: перечень всех спрятанных в исходниках задач
-«секретных флаг-ссылок», спрятанных **невидимой Unicode-стеганографией**, + что за ними стоит.
+Документ дополняет [`../MEMES.md`](../MEMES.md) результатами проверки адресов, связанных с
+Unicode-вставками и прямыми служебными ссылками в материалах задач.
 
-> **За каждой ссылкой — И троллинг-цепочка (декой), И настоящая мем-картинка.** Картинка
-> отдаётся по пути **`/m`** (через заголовок `refresh: 0;m` на главной). Все 5 картинок скачаны
-> в эту папку (`*.jpg`, см. §5). Это нумерованная коллекция мемов «медоед × пчела» (на одной —
-> *«коллекционный мем №98»*, отсюда и намёк оргов про «~100»).
+## 1. Область исследования
 
-## 1. Схема сокрытия
+Пять адресов получены декодированием variation selectors. Ещё два адреса присутствуют в материалах
+задач в открытом виде и используют тот же HTTP-механизм выдачи медиа. Эти две ссылки не относятся к
+Unicode-стеганографии и учитываются только при анализе reward-эндпоинтов.
 
-Байты полезной нагрузки спрятаны как прогон **невидимых вариационных селекторов** сразу
-после видимого якорного символа (эмодзи `🚩⛔❌🔐` или конец строки ошибки/лога):
+| Хост | Источник | Способ обнаружения |
+|---|---|---|
+| `mutedgift-9oevcdih.avitoctf.ru` | OnMute | variation selectors в `seed.js` и `comments.js` |
+| `marketdone-cgttbdfl.avitoctf.ru` | B2Bee | variation selectors в `PluginScanner.java` |
+| `zaletay-vh85lk0q.avitoctf.ru` | СОТЭК | variation selectors в TypeScript |
+| `beeintel-atfjzchx.avitoctf.ru` | BeeSix | variation selectors в `server.py` |
+| `aitreasure-3afw6lrp.avitoctf.ru` | МедоИИд | variation selectors в Go-коде |
+| `prizering-ij8tatnw.avitoctf.ru` | io_hrana | URL в runtime output после environment checks |
+| `supplrnd-unnfeu0s.avitoctf.ru` | BeeSix, СОТЭК | прямой URL в fallback-ветках исходного кода |
 
-| кодпоинты | значение байта |
+## 2. HTTP-поведение
+
+Корневой маршрут reward-хоста возвращает небольшую HTML-страницу. Для браузера задаётся переход на
+`/m`, где расположен JPEG-файл. Дополнительно корневая страница содержит последовательность POST-шагов
+с параметрами `step`, `want_flag`, `chall_name`, `artifacts` и `essay_flag`. Эта ветка не выдаёт
+результат задачи и не участвует в основной эксплуатации.
+
+Схема запросов:
+
+```text
+GET  /
+POST /  step=2&want_flag=1
+POST /  step=3&chall_name=<challenge>
+POST /  step=4&artifacts=<artifact>
+POST /  step=5&essay_flag=<text>
+GET  /m
+```
+
+Технически значимый ресурс — `GET /m`. Ответ содержит JPEG и не зависит от параметров основной
+задачи.
+
+## 3. Локальные медиа-артефакты
+
+Для сопоставления адресов сохранены следующие имена файлов. Изображения не включаются в git и не
+требуются для повторной проверки Unicode-кодирования.
+
+| Локальное имя | Хост |
 |---|---|
-| `U+FE00 … U+FE0F` | `cp − 0xFE00` (0–15) |
-| `U+E0100 … U+E01EF` | `cp − 0xE0100 + 16` (16–255) |
+| `mutedgift_onmute.jpg` | `mutedgift-9oevcdih.avitoctf.ru` |
+| `marketdone_b2bee.jpg` | `marketdone-cgttbdfl.avitoctf.ru` |
+| `zaletay_smarthive_sotek.jpg` | `zaletay-vh85lk0q.avitoctf.ru` |
+| `beeintel_beesix.jpg` | `beeintel-atfjzchx.avitoctf.ru` |
+| `aitreasure_slophacking.jpg` | `aitreasure-3afw6lrp.avitoctf.ru` |
+| `prizering.jpg` | `prizering-ij8tatnw.avitoctf.ru` |
+| `supplrnd.jpg` | `supplrnd-unnfeu0s.avitoctf.ru` |
 
-Каждая пасхалка декодируется в текст вида
-`good job, take your hidden flag: https://<host>.avitoctf.ru/`.
+## 4. Проверка
 
-## 2. Найдено: 7 reward-хостов с мем-картинками
-
-**5** спрятаны стего (вариационные селекторы), **+2** нашлись прямыми ссылками в наших заметках
-по task8 и sotolambda (не стего, но тот же reward-механизм `/m`). Проверено: из 27 avitoctf-хостов,
-упомянутых во всём репо, ровно эти 7 отдают `/m` → JPEG.
-
-| # | Хост-награда | Из какой задачи | Как нашли | Мем № |
-|---|---|---|---|---|
-| 1 | `mutedgift-9oevcdih` | task5 **OnMute** | стего: `seed.js`/`comments.js` (после `🚩`/`⛔`) | №98 |
-| 2 | `marketdone-cgttbdfl` | task6 **B2Bee** | стего: `PluginScanner.java` (после `❌`) | — |
-| 3 | `zaletay-vh85lk0q` | task16 **SmartHive** + **СОТЭК** (общий) | стего: `AuthController.java`/`route.ts` (после `❌`) | — |
-| 4 | `beeintel-atfjzchx` | task17 **BeeSix** | стего: `server.py` (после ошибки кривой) | — |
-| 5 | `aitreasure-3afw6lrp` | slophacking **МедоИИд** | стего: `api/main.go`/`executor/main.go` (после `🔐`) | — |
-| 6 | `prizering-ij8tatnw` | task8 **io_hrana** | прямая ссылка в заметках | — |
-| 7 | `supplrnd-unnfeu0s` | **СотоLambda** | прямая ссылка в заметках | №22 |
-
-Мемы — **нумерованная коллекция** «медоед-грейхэт × пчела-вайбкодер» (видели №22 и №98; всего
-серия ~100 по намёку оргов). Каждый хост отдаёт **один фиксированный** номер по `/m` (параметр
-`?n=` игнорится). Остальные ~93 недоступны: их reward-хосты (случайные суффиксы) нам неизвестны —
-URL раздаётся индивидуально по мере решения задач, а у нас есть ссылки только на эти 7.
-
-Полный список стего-вхождений (дубли в `src/`, build-output, `.jar`/`.zip`) — в `../MEMES.md`, табл. 2.
-
-Проверенные, но **не** использованные для пасхалок схемы (для прозрачности): tag-символы
-`U+E0000–E007F` (это легитимные subdivision-флаги эмодзи в task11 — England/Scotland/Wales,
-не стего), zero-width `U+200B/0C/0D/FEFF`, bidi/format-контролы. Живые страницы и ответы API на
-инстансах — чистые: пасхалки лежат только в поставленных/утёкших исходниках.
-
-## 3. Что за ссылками — троллинг-цепочка (а не картинка)
-
-Каждый хост (`nginx` + `PHP/8.5.8`) отдаёт крошечную страницу с HTML-комментарием-подсказкой и
-гоняет по нарастающе-абсурдной форме (проверено на mutedgift = OnMute):
-
-```
-GET  /                         → <!-- POST here step=2&want_flag=1
-POST step=2&want_flag=1        → <!-- POST here step=3&chall_name=CHALLENGE_NAME (если близко — пройдёшь)
-POST step=3&chall_name=OnMute  → PASS! POST here the artifact name(s) step=4&artifacts=...
-POST step=4&artifacts=seed.js  → POST here a 100-word essay on global warming in cybersecurity step=5&essay_flag=...
-POST step=5&essay_flag=<эссе>  → POST here your family step=6&model_name=...
-POST step=6&...                → (429 Too Many Requests; цепочка продолжается в том же духе)
-```
-
-Троллинг-цепочка — **декой** (шутка). Настоящая награда — **мем-картинка по `/m`**: главная
-отдаёт заголовок `refresh: 0;m`, т.е. браузер сразу уходит на `https://<host>/m`, где лежит
-JPEG (~350–600 КБ). Именно это мы и скачали.
-
-## 4. Как достать картинку
+Декодирование исходников:
 
 ```bash
-curl -s https://mutedgift-9oevcdih.avitoctf.ru/m -o mutedgift_onmute.jpg   # и т.д. для 5 хостов
+uv run python memes/meme_scan.py .
 ```
 
-## 5. Скачанные мем-картинки (в этой папке) — 7 шт.
-
-| файл | хост | задача | № |
-|---|---|---|---|
-| `mutedgift_onmute.jpg` | mutedgift-9oevcdih | task5 OnMute | 98 |
-| `marketdone_b2bee.jpg` | marketdone-cgttbdfl | task6 B2Bee | — |
-| `zaletay_smarthive_sotek.jpg` | zaletay-vh85lk0q | task16 SmartHive + СОТЭК | — |
-| `beeintel_beesix.jpg` | beeintel-atfjzchx | task17 BeeSix | — |
-| `aitreasure_slophacking.jpg` | aitreasure-3afw6lrp | slophacking | — |
-| `prizering.jpg` | prizering-ij8tatnw | task8 io_hrana | — |
-| `supplrnd.jpg` | supplrnd-unnfeu0s | СотоLambda | 22 |
-
-Все 7 — валидные JPEG, попарно различны. Серия: «медоед-грейхэт × пчела-вайбкодер»,
-нумерованные коллекционные мемы (видели №22 и №98).
-
-## 6. Как перепроверить пасхалки
+Проверка типа ресурса без сохранения тела:
 
 ```bash
-python3 ../meme_scan.py ..           # свип исходников на скрытые селекторы
+curl -sSI https://mutedgift-9oevcdih.avitoctf.ru/m
 ```
 
----
-*Итог: 5/5 скрытых стего-пасхалок найдены и расшифрованы; за каждой — мем-картинка (скачаны,
-§5) плюс троллинг-декой (§3).*
+Сохранение конкретного артефакта при необходимости:
+
+```bash
+curl -fsS https://mutedgift-9oevcdih.avitoctf.ru/m -o mutedgift_onmute.jpg
+file mutedgift_onmute.jpg
+```
+
+Проверка считается успешной, если Unicode-последовательность детерминированно декодируется в
+ожидаемый хост, а `/m` возвращает изображение формата JPEG.

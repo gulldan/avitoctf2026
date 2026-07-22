@@ -31,6 +31,7 @@ Run::
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -104,7 +105,15 @@ def upload_and_run(jar: Path, base: str) -> str | None:
 
 def main() -> None:
     """Build+locally-verify the plugin, upload it, and print the leaked flag."""
-    base = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else DEFAULT_BASE
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default=DEFAULT_BASE,
+        help=f"challenge base URL (default: {DEFAULT_BASE})",
+    )
+    args = parser.parse_args()
+    base = args.base_url.rstrip("/")
 
     jar = build_plugin()
     emit(f"[build] plugin jar ready: {jar}")

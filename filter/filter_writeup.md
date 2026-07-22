@@ -1,82 +1,86 @@
-# Медофильтр (HoneyFilter v1) — разбор
+# HoneyFilter v1 — технический разбор
 
 **Флаг:** `avito{ge7_in_Queu3_F0r_h0N3y!}`
-**Класс:** Net · Firewall · Golang (сетевой файрвол на языке Go) · **Сложность:** Medium ·
-**Автор:** @daniil159x, SPbCTF
+**Класс:** Network Security / Go / NFQUEUE
 
-> **v1 и v2 — это одна и та же задача с одним и тем же багом.** Исходники `filter` (v1) и `filter2`
-> (v2) **байт-в-байт одинаковые** (тот же архив `filter_74031b7.zip`), поэтому один эксплойт снимает
-> оба флага. **Полный разбор — с бытовыми аналогиями, всеми тупиками и проверками — лежит в
-> [`../filter2/filter2_writeup.md`](../filter2/filter2_writeup.md).** Здесь — короткая версия: суть
-> в двух словах, отличия v1 и команда запуска.
+## Краткое техническое резюме
 
-## В двух словах (без терминов)
+Управляемый HTTP-ответ `/ping` вызывает panic в HTTP parser процесса `hlp`. Последовательные завершения
+до истечения `startsecs=1` исчерпывают `startretries=3`, после чего `supervisord` переводит процесс в
+состояние `FATAL`. Правило NFQUEUE содержит
+`--queue-bypass`, поэтому отсутствие userspace consumer переводит фильтрацию в fail-open. После
+остановки `hlp` запрос `/static/honey.txt` проходит без DPI-проверки.
 
-Перед складом с флагом стоит охранник (файрвол), и у него приказ: увидишь коробку с наклейкой «мёд»
-(файл `honey.txt`, где спрятан флаг) — заворачивай обратно. По-честному флаг не вынести. Но охранника
-можно довести до обморока кривой бумажкой, а нянька, которая его поднимает, после трёх падений подряд
-сдаётся и уходит. А на воротах висит правило: «нет охранника — пропускать всех». Роняем охранника три
-раза, нянька сдаётся, ворота открыты — и «медовая» коробка выезжает наружу вместе с флагом.
+## 1. Контекст и цель
 
-Подробно, почему каждый шаг работает и почему не помогают «честные» обходы, разобрано в
-[`../filter2/filter2_writeup.md`](../filter2/filter2_writeup.md). Здесь пересказ короткий.
+CDN отдаёт static content из `www-data/`, включая `honey.txt` с флагом. Исходящий traffic проходит
+через userspace DPI process `hlp`, блокирующий responses с signature `avito{`. Ответ
+`GET /static/honey.txt` полностью помещается в первый reassembled fragment и блокируется. Для анализа
+доступны исходники `filter_74031b7.zip` и адрес service.
 
-## 1. Что за задача
+## 2. Reconnaissance и attack surface
 
-Маленький сайт-раздатчик файлов (CDN) отдаёт статику из папки `www-data/`: картинки-приманки и
-`honey.txt` с флагом. Перед ним стоит **файрвол** (программа-«таможенник», просматривает исходящий
-трафик) с единственной задачей — **не выпускать наружу ответ, в котором есть `avito{`**. Обычный
-`GET /static/honey.txt` не проходит: флаг в самом начале крохотного ответа, файрвол ловит его первым же
-куском. Нам дали полные исходники (`filter_74031b7.zip`) и адрес сайта.
+Exploit chain выводит DPI-компонент из эксплуатации:
 
-## 2. Разведка — как устроена мишень
+1. Parser `hlp` завершается panic при malformed trailer: обработчик
+   `responce.TrailerNonChanked` (`responce.go:64-65`) вызывает `bytes.SplitN(..., ":", 2)` и
+   обращается к отсутствующему element `[1]`, если delimiter `:` отсутствует.
+2. Panic достигается через echo endpoint `/ping`.
+   Большой echo response использует chunked transfer encoding, а ошибочный buffer reset
+   (`responce.Add`, `fullResponceMaxSize = 3072`, проверка выполняется до append) смещает parser start
+   на контролируемый fragment. Body заполняется повторами crafted response
+   `HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nZ\r\n` с front padding `0..40`: parser принимает
+   crafted response, после чего строка `Z` без delimiter вызывает **panic**.
+3. `supervisord` с параметрами по умолчанию (`startretries=3`, `startsecs=1`) переводит `hlp` в
+   `FATAL`, если последовательные запуски завершаются до перехода в состояние `RUNNING`.
+4. `iptables ... --queue-bypass` реализует fail-open при отсутствии NFQUEUE consumer.
+   `GET /static/honey.txt` возвращает `200` и флаг.
 
-Идея решения — **не обхитрить детектор, а вывести файрвол из строя**. Четыре шага (детали и «почему
-именно так» — в разборе v2):
+Solver отправляет crash payloads параллельно с запросами `honey.txt`: это покрывает как короткое окно
+без NFQUEUE listener между перезапусками, так и постоянный fail-open после `FATAL`.
 
-1. У файрвола `hlp` есть место, где он **аварийно падает** от кривого ввода — разбор «хвоста» ответа
-   `responce.TrailerNonChanked` (`responce.go:64-65`) режет строку по двоеточию и падает
-   (`index out of range`), если двоеточия в строке нет. В Go такое падение называется **panic** —
-   процесс умирает.
-2. Дотягиваемся до этой паники через эндпоинт `/ping` — он возвращает наши же байты обратно («эхо»).
-   Большой эхо-ответ идёт кусками (`chunked`), а баг обнуления буфера (`responce.Add`, порог
-   `fullResponceMaxSize = 3072`, проверка стоит **до** добавления данных) переставляет «начало разбора»
-   ровно на наш кусок. Набиваем тело повторами поддельного ответа
-   `HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nZ\r\n` (перебирая паддинг 0..40) → парсер попадает на
-   подделку → строка `Z` без двоеточия → **panic**.
-3. `supervisord` (нянька процессов) с дефолтами (`startretries=3`, `startsecs=1`) после **трёх быстрых
-   падений** сдаётся («entered FATAL state») и больше `hlp` не поднимает.
-4. Файрвола на посту нет, а правило `iptables ... --queue-bypass` означает **«нет проверяльщика —
-   пропускать всех»** (это называется fail-open). `GET /static/honey.txt` → 200 + флаг.
+## 3. Анализ и проверка гипотез
 
-Проверено на локальной копии того же образа: 4 crash-запроса, ~0.4 секунды, 200 + флаг (подробные
-проверки — в §3 разбора v2).
+- **Хост:** `https://filter-srv-ow2wt9j6.avitoctf.ru`.
+- **Размер `honey.txt`:** fixture `avito{REDACTED}\n` в source archive занимает 16 bytes. Production
+  response также значительно меньше лимита reassembly buffer, поэтому marker находится в первом
+  reassembled fragment.
+- **Blocked response:** connection остаётся открытым до client timeout, поскольку DPI не выпускает
+  packets, содержащие marker.
 
-## 3. Как дошли до решения и чем v1 отличается
+Уязвимый parser обрабатывает строки после завершённого HTTP body как non-chunked trailers:
 
-- **Хост:** `https://filter-srv-ow2wt9j6.avitoctf.ru` (у v2 — `filter2-srv-...`).
-- **Размер `honey.txt`:** в публичном архиве v1 файл ~16 байт (у v2 — ~48). На детект и на эксплойт это
-  не влияет: флаг всё равно в первом же куске, `hlp` всё равно роняется через `/ping`.
-- **Что видно при дропе honey.txt:** в v1 сокет **виснет до таймаута**, а в v2 внешний эдж отдаёт 504
-  за ~2.1 секунды. Причина одна и та же (ответ с флагом дропается файрволом), разный только таймаут
-  внешнего эджа.
-
-## 4. В чём именно ошибка
-
-Уязвимость складывается из трёх ошибок: парсер доверяет форме строки и паникует на хвосте без
-двоеточия; `supervisord` после серии быстрых падений перестаёт перезапускать процесс; правило
-`--queue-bypass` при отсутствии обработчика пропускает трафик без проверки. Первая ошибка даёт
-управляемый crash, вторая превращает его в постоянное отключение, третья делает отказ защитного
-компонента обходом защиты.
-
-## 5. Запуск
-
-```
-uv run python filter/solve_filter.py https://filter-srv-ow2wt9j6.avitoctf.ru
+```go
+nameAndValue := bytes.SplitN(line, []byte(":"), 2)
+trailer.Add(string(nameAndValue[0]), string(nameAndValue[1]))
 ```
 
-`solve_filter.py` — тот же код, что и `../filter2/solve_filter2.py`; base-URL параметризован, отличается
-только адрес по умолчанию.
+Если строка не содержит `:`, обращение к `nameAndValue[1]` завершает `hlp` с panic. Solver передаёт
+через `/ping` 1000 повторов 41-byte marker
+`HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nZ\r\n` и перебирает front padding `0..40`. После
+ошибочного reset на границе 3072 bytes один из fragments начинается с полного crafted response, а
+строка `Z` попадает в trailer parser.
+
+## 4. Корневая причина
+
+Exploit chain состоит из трёх дефектов: unchecked trailer parsing вызывает process panic;
+`supervisord` после исчерпания restart attempts переводит `hlp` в `FATAL`; `--queue-bypass` пропускает
+traffic при отсутствии NFQUEUE consumer. В результате remote process crash приводит к постоянному
+отключению enforcement component и fail-open filtering.
+
+## 5. Эксплуатация
+
+1. Запустить solver с base URL instance:
+   ```bash
+   uv run python filter/solve_filter.py https://filter-srv-ow2wt9j6.avitoctf.ru
+   ```
+2. Crash workers отправляют `POST /ping` с 1000 repetitions crafted response и последовательно
+   перебирают front padding `0..40`.
+3. Fetch workers параллельно выполняют `GET /static/honey.txt`. Флаг может пройти как в transient
+   interval между panic и повторной регистрацией NFQUEUE consumer, так и после перехода `hlp` в
+   `FATAL`.
+4. Solver извлекает marker `avito{...}` из HTTP response и прекращает оставшиеся workers; при
+   отсутствии результата работа завершается по deadline.
 
 ## 6. Флаг
 
@@ -84,23 +88,21 @@ uv run python filter/solve_filter.py https://filter-srv-ow2wt9j6.avitoctf.ru
 avito{ge7_in_Queu3_F0r_h0N3y!}
 ```
 
-Снят с живого инстанса первым же запуском `solve_filter.py` — эксплойт сработал с первой попытки.
+## 7. Выводы и рекомендации
 
-## 7. Мораль — какой это урок
+Защитные компоненты должны использовать fail-closed policy: невозможность выполнить inspection не
+должна разрешать трафик. Parser должен корректно обрабатывать malformed input без завершения процесса.
+Кроме того, restart policy должна исключать постоянное отключение enforcement-компонента после серии
+управляемых crash.
 
-Коротко: **защитный компонент не должен «открываться» при собственном сбое.** Файрвол устроен так, что
-любое его «поломать» (уронить, переполнить, обрезать пакет) трактуется как «пропустить» (fail-open) — а
-значит любой способ его сломать автоматически становится способом обойти. Правильно — при невозможности
-проверить трафик **блокировать** (fail-closed). Плюс два усилителя ошибки: неверный порядок операций у
-границы буфера отдал атакующему контроль над точкой начала разбора, а дефолтная политика перезапуска
-(`startretries=3`) позволила выключить «охранника» насовсем всего тремя падениями. Развёрнутая мораль (с
-разбором каждого из четырёх багов) — в §7 разбора
-[`../filter2/filter2_writeup.md`](../filter2/filter2_writeup.md).
+## 8. Файлы для воспроизведения
 
-## 8. Файлы в папке
+Version-controlled artifacts:
 
-- `solve_filter.py` — скрипт-решение (тот же код, что `../filter2/solve_filter2.py`, с адресом v1 по
-  умолчанию): роняет `hlp` в FATAL через `/ping` и параллельно снимает `honey.txt`.
-- `filter_74031b7.zip` — исходники задачи, выданные организаторами (идентичны архиву в `filter2/`).
-- `src/filter/` — распакованные исходники (файрвол `hlp`, CDN, `supervisord.conf`, `Dockerfile`).
-- `FLAG.txt` — снятый флаг.
+- [`solve_filter.py`](solve_filter.py) — solver для controlled panic через `/ping` и параллельного
+  получения `honey.txt` в listener-free interval; sustained crash sequence также может исчерпать
+  restart budget `hlp`.
+- [`FLAG.txt`](FLAG.txt) — извлечённый флаг.
+
+`filter_74031b7.zip` и unpacked build context не входят в version-controlled набор; solver не требует
+их для remote run.

