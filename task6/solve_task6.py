@@ -11,7 +11,7 @@ forbidden owner directly, and instead does everything through
 string constants, is invisible to the scanner while still reading the flag at runtime. See
 ``b2bee_task6_writeup.md`` §3-4 for the full reasoning and the enumerated policy gaps.
 
-This script reproduces the whole chain:
+With the external build inputs restored, this script reproduces the whole chain:
   1. Build the plugin (``exploit/src/example/SeasonalDiscountPlugin.java``) with
      ``exploit/build.sh``, which also locally re-runs the *real* scanner
      (``marketplugins/PluginScanner.java`` + ``SandboxPolicy.java``) against the built JAR,
@@ -19,18 +19,19 @@ This script reproduces the whole chain:
   2. Upload the verified JAR to ``POST /api/plugins/run`` with a non-empty cart and read the
      flag back from ``result.message``.
 
-Requires a JDK 21 ``javac``/``jar``/``javap`` on ``PATH`` (falls back to the Homebrew
-``openjdk@21`` keg used when this was built) and a live challenge instance for step 2.
+The build is runnable from a clean checkout. It needs a JDK 21 and ``curl``;
+``build.sh`` downloads two pinned ASM 9.7 jars into the ignored build directory
+and verifies their SHA-256. The public API compile stubs and scanner harness are
+part of the repository. Step 2 additionally needs a live challenge instance.
 
 Run::
 
-    uv run task6/solve_task6.py [base_url]
+    uv run python task6/solve_task6.py [base_url]
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -58,7 +59,10 @@ def emit(message: str) -> None:
 def build_subprocess_env() -> dict[str, str]:
     """Return an environment with a JDK 21 toolchain reachable on ``PATH``."""
     env = os.environ.copy()
-    if shutil.which("javac", path=env.get("PATH")) is None and JDK_FALLBACK_BIN.is_dir():
+    java_home_bin = Path(env.get("JAVA_HOME", "")) / "bin" if env.get("JAVA_HOME") else None
+    if java_home_bin and (java_home_bin / "javac").is_file():
+        env["PATH"] = f"{java_home_bin}{os.pathsep}{env.get('PATH', '')}"
+    elif JDK_FALLBACK_BIN.is_dir():
         env["PATH"] = f"{JDK_FALLBACK_BIN}{os.pathsep}{env.get('PATH', '')}"
     return env
 

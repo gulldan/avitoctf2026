@@ -31,7 +31,7 @@ the live challenge host (this will not work from a sandboxed environment
 without egress to ``*.avitoctf.ru``).
 
 Usage:
-    BOTNET_PASS=... python3 solve_botnet.py --host botnet-XXXX.avitoctf.ru
+    BOTNET_PASS=... uv run python botnet/solve_botnet.py --host botnet-XXXX.avitoctf.ru
 """
 
 from __future__ import annotations
@@ -75,16 +75,30 @@ def _read_until(proc: subprocess.Popen[bytes], marker: bytes, timeout: float) ->
 
 
 def _run(proc: subprocess.Popen[bytes], cmd: str, tag: str, timeout: float = 25.0) -> str:
-    """Send *cmd* to the live session, wait for its sentinel echo, return decoded output."""
+    """Send *cmd* to the live session, wait for its sentinel, return decoded output.
+
+    The session runs under ``ssh -tt`` (a real pty), so the terminal echoes every
+    line we type back onto stdout. If we sent a plain ``echo <marker>``, the echoed
+    *input* line would already contain the contiguous marker and ``_read_until``
+    would return on it — before the command finished — leaking the command's real
+    output (and the real sentinel) into the next call.
+
+    Fix: emit the sentinel *split* as ``PREFIX<tag>"SUFFIX"``. The shell concatenates
+    the two literals, so ``echo`` prints the contiguous marker, but the echoed input
+    line keeps the ``"`` between the halves and never matches the contiguous marker.
+    Only the command's genuine output does — so we always wait for the command to end.
+    """
     assert proc.stdin is not None
     marker = f"{_START}{tag}{_END}"
-    full = f"{cmd}\necho {marker}\n"
-    proc.stdin.write(full.encode())
+    sentinel_cmd = f'echo {_START}{tag}"{_END}"'  # prints the contiguous marker
+    proc.stdin.write(f"{cmd}\n{sentinel_cmd}\n".encode())
     proc.stdin.flush()
     raw = _read_until(proc, marker.encode(), timeout)
     text = raw.decode("utf-8", "replace")
-    idx = text.find(marker)
-    return text[:idx] if idx != -1 else text
+    idx = text.find(marker)  # contiguous marker == echo's OUTPUT, not the input echo
+    text = text[:idx] if idx != -1 else text
+    cut = text.rfind(sentinel_cmd)  # drop the pty echo of the sentinel command line
+    return text[:cut] if cut != -1 else text
 
 
 # One-shot bash toolkit for the remote side: pure builtins only (no

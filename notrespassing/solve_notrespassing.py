@@ -38,10 +38,9 @@ token from the mail.tm inbox -> reset admin's password -> log in as admin
 file row ever created by bootstrap.php) -> flag.
 
 Usage:
-    uv run --with requests python solve_notrespassing.py [BASE_URL]
+    uv run python notrespassing/solve_notrespassing.py [BASE_URL]
 
-Requires: requests. No local type stubs for `requests` in some `ty`
-environments; if `ty check` complains, that's expected for this dependency.
+Dependencies are installed by the repository's root ``uv sync``.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ import threading
 import time
 import urllib.request
 
-import websocket  # websocket-client  # ty: ignore[unresolved-import]
+import websocket  # websocket-client
 
 CDP_HTTP = "http://localhost:9222"
 

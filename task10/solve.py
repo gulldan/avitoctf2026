@@ -52,10 +52,11 @@ import re
 import socket
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 HOST, PORT = "maya-iiklm8rm.avitoctf.ru", 30013
 SECRET = b"v3FpEne80zLFyP1rOfj5rQ"
-SPEC_PATH = "mayes_spec.json"
+SPEC_PATH = str(Path(__file__).with_name("mayes_spec.json"))
 
 
 # ============================================================================

@@ -24,7 +24,7 @@ precomputed once at keygen and never rotate either), so they can be
 copied byte-for-byte from any real token.
 
 Usage:
-    python3 solve.py
+    uv run python napaseke/solve.py
 """
 
 import random
@@ -33,8 +33,8 @@ import string
 import sys
 import threading
 import time
+from pathlib import Path
 
-sys.path.insert(0, ".")
 from xmss_forge import (
     WOTS_LEN,
     XMSS_SIG_SIZE,
@@ -47,6 +47,7 @@ HOST = "napaseke-m9ybjl6b.avitoctf.ru"
 PORT = 30012
 INVITE = "E3MPQmoiWnaRkA35E8yqwg"
 TARGET_USER = b"kopatych"
+OUTPUT_DIR = Path(__file__).resolve().parent
 
 MENU = b"Enter your choice: "
 NICK_PROMPT = b"Nickname (max 16 chars): "
@@ -250,8 +251,7 @@ def main():
     token_hex = build_forged_token(harvester)
     print("[+] forged token:", token_hex)
 
-    with open("forged_token.txt", "w") as f:
-        f.write(token_hex + "\n")
+    (OUTPUT_DIR / "forged_token.txt").write_text(token_hex + "\n")
 
     # Now log in with the forged token and read kopatych's wall.
     s = new_conn()
@@ -267,8 +267,7 @@ def main():
     out = recv_until(s, MENU).decode(errors="replace")
     print("[wall]\n", out)
 
-    with open("wall_output.txt", "w") as f:
-        f.write(out)
+    (OUTPUT_DIR / "wall_output.txt").write_text(out)
 
     s.sendall(b"Q\n")
     s.close()

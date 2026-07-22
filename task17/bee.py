@@ -11,40 +11,43 @@ What:
 Approach (full solve — see beesix_task17_writeup.md):
     The protocol falls to three stacked flaws: a static (reused) server ECDH key, a
     homemade prefix-MAC ``SHA256(key ‖ payload)`` vulnerable to length-extension, and
-    MAC-then-decrypt whose padding error is distinguishable by response length. Those
-    give a CBC padding oracle that decrypts the captured agent-0x00B traffic offline,
-    recovering the login/password. This module is where the recovered credentials are
-    used: drop them into ``LOGIN`` / ``PASSWORD`` (kept as placeholders here — no
-    secrets committed) and run to log in and read the flag.
+    a distinguishable padding error after authentication. The wire format is actually
+    Encrypt-then-MAC and the server verifies the tag before decrypting; the problem is
+    that length extension lets us forge that tag and reach an *online* CBC padding
+    oracle. We use it to decrypt the captured agent-0x00B traffic and recover the
+login/password. This module is where the recovered credentials are used. They are
+published CTF solution data (not live personal secrets), and every endpoint/credential
+can also be overridden through CLI options or environment variables.
 
 Dependencies:
-    stdlib + ``cryptography``. The repo's uv venv does NOT install ``cryptography``
-    (it is not a project dependency), so ``ty`` cannot resolve those imports and they
-    carry a narrow ``# ty: ignore[unresolved-import]``. With ``cryptography`` installed
-    (it ships ``py.typed``) the module type-checks cleanly. ``ruff`` passes as-is.
+    stdlib + ``cryptography`` from the repository's root ``uv`` environment.
 """
 
+import argparse
 import hashlib
 import hmac
 import os
 import socket
 import struct
-import sys
 
-from cryptography.hazmat.primitives import padding, serialization  # ty: ignore[unresolved-import]
-from cryptography.hazmat.primitives.asymmetric import ec  # ty: ignore[unresolved-import]
-from cryptography.hazmat.primitives.ciphers import (  # ty: ignore[unresolved-import]
+from cryptography.hazmat.primitives import padding, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers import (
     Cipher,
     algorithms,
     modes,
 )
 
 CURVE = ec.SECP256R1()
-HOST = "beesix-4bkdqxf2.avitoctf.ru"
-PORT = 30014
-SECRET = "YLABYQidu0G3ihtYKPqk6g"
-LOGIN = "test"
-PASSWORD = "test"
+DEFAULT_HOST = "beesix-4bkdqxf2.avitoctf.ru"
+DEFAULT_PORT = 30014
+DEFAULT_SECRET = "YLABYQidu0G3ihtYKPqk6g"
+DEFAULT_LOGIN = "james_beend"
+DEFAULT_PASSWORD = "C30D5tQ72hRn0Q2"
+# Compatibility aliases used by the captured-traffic oracle module.
+HOST = DEFAULT_HOST
+PORT = DEFAULT_PORT
+SECRET = DEFAULT_SECRET
 
 
 def send_frame(sock, payload):
@@ -128,11 +131,17 @@ def recv_secure(sock, key):
     return decrypt_message(key, pkt)
 
 
-def connect(client_private_key=None):
+def connect(
+    client_private_key=None,
+    *,
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    secret=DEFAULT_SECRET,
+):
     """Full handshake. Returns (sock, key, server_pub_der, first_msg)."""
-    sock = socket.create_connection((HOST, PORT), timeout=15)
+    sock = socket.create_connection((host, port), timeout=15)
     _prompt = recv_exact(sock, len(b"Enter secret: "))
-    sock.sendall(SECRET.encode() + b"\n")
+    sock.sendall(secret.encode() + b"\n")
     line = recv_plain_line(sock)
     if line != b"Access granted!":
         raise RuntimeError(f"auth failed: {line!r}")
@@ -146,14 +155,23 @@ def connect(client_private_key=None):
     return sock, key, server_pub_der, first
 
 
-def login_and_run(commands):
-    sock, key, spub, first = connect()
+def login_and_run(
+    commands,
+    *,
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    secret=DEFAULT_SECRET,
+    login=DEFAULT_LOGIN,
+    password=DEFAULT_PASSWORD,
+):
+    """Connect with recovered credentials and execute the requested HQ commands."""
+    sock, key, spub, first = connect(host=host, port=port, secret=secret)
     print("[*] server pub (der hex):", spub.hex())
     print("[*] first msg:", repr(first))
     # first is "login:"
-    send_secure(sock, key, LOGIN)
+    send_secure(sock, key, login)
     print("[*] ->", repr(recv_secure(sock, key)))  # password:
-    send_secure(sock, key, PASSWORD)
+    send_secure(sock, key, password)
     print("[*] auth resp:", repr(recv_secure(sock, key)))
     results = {}
     for cmd in commands:
@@ -166,6 +184,28 @@ def login_and_run(commands):
     return results
 
 
+def main() -> None:
+    """CLI entry point for the final authenticated protocol stage."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--host", default=os.environ.get("BEESIX_HOST", DEFAULT_HOST))
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("BEESIX_PORT", DEFAULT_PORT))
+    )
+    parser.add_argument("--secret", default=os.environ.get("BEESIX_SECRET", DEFAULT_SECRET))
+    parser.add_argument("--login", default=os.environ.get("BEESIX_LOGIN", DEFAULT_LOGIN))
+    parser.add_argument("--password", default=os.environ.get("BEESIX_PASSWORD", DEFAULT_PASSWORD))
+    parser.add_argument("commands", nargs="*")
+    args = parser.parse_args()
+    commands = args.commands or ["list", "read new_hive_location.txt"]
+    login_and_run(
+        commands,
+        host=args.host,
+        port=args.port,
+        secret=args.secret,
+        login=args.login,
+        password=args.password,
+    )
+
+
 if __name__ == "__main__":
-    cmds = sys.argv[1:] or ["help", "list"]
-    login_and_run(cmds)
+    main()

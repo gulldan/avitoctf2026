@@ -77,7 +77,7 @@ exception; declaring a full 4GiB own-memory does not help because bee is in an
 structured k-sweep across restarts is the most reliable primitive.
 
 Usage:
-    uv run david/solve_david.py --url https://<live-instance>/
+    uv run python david/solve_david.py --url https://<live-instance>/
 """
 
 from __future__ import annotations

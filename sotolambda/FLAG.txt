@@ -1,8 +1,1 @@
 avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}
-
-Task: SotoLambda / СотоLambda (Avito CTF 2026) — sandbox worker privesc to root.
-Recovered: 2026-07-19.
-Path: timeout-triggered leak of the worker's root-opened /etc/shadow fd,
-      inherited across execv() by our dropped-priv child -> dump /etc/shadow
-      -> crack root's DES-crypt hash (azMuiLc/ZPwrM = "mole") -> auth as root
-      via /api/invoke -> cat /root/flag.txt.

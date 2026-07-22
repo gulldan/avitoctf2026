@@ -16,19 +16,20 @@ own dependencies (no type stubs; unresolved-import is expected under `ty`).
 import logging
 import os
 import struct
+from typing import override
 
-from volatility3.framework import (  # ty: ignore[unresolved-import]
+from volatility3.framework import (
     exceptions,
     interfaces,
     renderers,
 )
-from volatility3.framework.configuration import (  # ty: ignore[unresolved-import]
+from volatility3.framework.configuration import (
     requirements,
 )
-from volatility3.framework.interfaces import (  # ty: ignore[unresolved-import]
+from volatility3.framework.interfaces import (
     plugins,
 )
-from volatility3.framework.renderers import (  # ty: ignore[unresolved-import]
+from volatility3.framework.renderers import (
     format_hints,
 )
 
@@ -54,6 +55,7 @@ class EbeeMaps(plugins.PluginInterface):
     _version = (1, 0, 0)
 
     @classmethod
+    @override
     def get_requirements(cls) -> list[interfaces.configuration.RequirementInterface]:
         return [
             requirements.ModuleRequirement(
@@ -92,7 +94,10 @@ class EbeeMaps(plugins.PluginInterface):
         return f"{info} -> {path}"
 
     def _generator(self):
-        vmlinux = self.context.modules[self.config["kernel"]]
+        kernel_name = self.config["kernel"]
+        if not isinstance(kernel_name, str):
+            raise TypeError("Volatility kernel module name must be a string")
+        vmlinux = self.context.modules[kernel_name]
         layer = self.context.layers[vmlinux.layer_name]
         prog_idr = vmlinux.object_from_symbol("prog_idr")
         seen_maps = set()
@@ -181,6 +186,7 @@ class EbeeMaps(plugins.PluginInterface):
                 except exceptions.InvalidAddressException as e:
                     yield (0, (str(name), i, -1, "ERR", -1, "", format_hints.Hex(0), str(e)))
 
+    @override
     def run(self):
         headers = [
             ("Prog", str),

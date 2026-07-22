@@ -32,6 +32,7 @@ flag. No Volatility install or symbol table is required.
 from __future__ import annotations
 
 import argparse
+import mmap
 import re
 import struct
 import sys
@@ -58,17 +59,18 @@ def decode_run(blob: bytes, key: int) -> str:
 
 def carve_flag(image_path: str, key: int) -> tuple[str, str] | None:
     """Scan the raw dump for keystroke-record runs and return (flag, stream)."""
-    with open(image_path, "rb") as fh:
-        data = fh.read()
-
-    best: tuple[str, str] | None = None
-    for match in RECORD_RE.finditer(data):
-        stream = decode_run(match.group(), key)
-        flag_match = FLAG_RE.search(stream)
-        # Prefer the longest decoded stream (the full C2 queue, not the short
-        # current_buffer window).
-        if flag_match and (best is None or len(stream) > len(best[1])):
-            best = (flag_match.group(0), stream)
+    with (
+        open(image_path, "rb") as fh,
+        mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as data,
+    ):
+        best: tuple[str, str] | None = None
+        for match in RECORD_RE.finditer(data):
+            stream = decode_run(match.group(), key)
+            flag_match = FLAG_RE.search(stream)
+            # Prefer the longest decoded stream (the full C2 queue, not the short
+            # current_buffer window).
+            if flag_match and (best is None or len(stream) > len(best[1])):
+                best = (flag_match.group(0), stream)
     return best
 
 

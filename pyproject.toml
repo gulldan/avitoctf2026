@@ -1,11 +1,25 @@
 [project]
 name = "avitoctf2026"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproducible Avito CTF 2026 write-ups and solver scripts"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12,<3.13"
 dependencies = [
+    "aim==3.29.1",
+    "cryptography",
+    "fastapi==0.138.1",
+    "gmpy2",
+    "httpx",
+    "httpx2==2.7.0",
+    "numpy",
+    "paramiko",
+    "pillow",
+    "python-multipart==0.0.32",
     "requests>=2.34.2",
+    "uvicorn==0.49.0",
+    "volatility3",
+    "wasmtime==45.0.0",
+    "websocket-client",
 ]
 
 [dependency-groups]
@@ -13,24 +27,21 @@ dev = [
     "ruff>=0.15.21",
     "ty>=0.0.58",
 ]
-task2 = [
-    "numpy>=2.5.1",
-    "pillow>=12.3.0",
-]
-
 # ---------------------------------------------------------------------------
 # Ruff
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py314"
-# Репозиторий .gitignore прячет всё, кроме двух curated-скриптов, но чистим ВСЁ дерево
-# одноразовых solver/exploit-скриптов task2..task21 → отключаем respect-gitignore.
+target-version = "py312"
+# Проверяем всё дерево наших solver/exploit-скриптов независимо от .gitignore.
 respect-gitignore = false
-# Вендоренный пакет aim + его venv — не наш код, не трогаем.
-# (venv/.venv/site-packages/__pycache__ уже в дефолтных excludes ruff.)
-# task13/aim_ui_core.py — дословная копия aim_ui/build/aim_ui_core.py (Pyodide/js), тоже вендор.
-extend-exclude = ["task13/aimsrc", "task13/aim_ui_core.py"]
+# Не форматируем дословно сохранённые исходники заданий и вендоренный Aim UI.
+extend-exclude = [
+    "david/src",
+    "task13/aimsrc",
+    "task13/aim_ui_core.py",
+    "task17/beesix",
+]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -98,16 +109,20 @@ convention = "google"
 # ty
 # ---------------------------------------------------------------------------
 [tool.ty.environment]
-python-version = "3.14"
+python-version = "3.12"
 root = ["./"]
 
-# ty по умолчанию уважает .gitignore → проверяет только curated-скрипты (task4/task7),
-# которые обязаны проходить `all = "error"`. Одноразовые solver/exploit-скрипты используют
-# неустановленные/браузерные зависимости (playwright, paramiko, cryptography, js, pyodide)
-# и динамические идиомы (re.match(...).group()) — их полная типизация вне задачи.
-# Явно исключаем вендоренные деревья на случай запуска ty с --no-respect-ignore-files.
+# Проверяем всё дерево наших solver/exploit-скриптов, даже если файл не предназначен для git.
+# Исключены только дословно сохранённые исходники заданий и вендоренный Aim UI.
 [tool.ty.src]
-exclude = ["task13/aimsrc", "task13/aim_ui_core.py"]
+respect-ignore-files = false
+exclude = [
+    ".venv",
+    "david/src",
+    "task13/aimsrc",
+    "task13/aim_ui_core.py",
+    "task17/beesix",
+]
 
 [tool.ty.rules]
 all = "error"

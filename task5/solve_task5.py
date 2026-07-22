@@ -22,7 +22,7 @@ The command executes and the bot returns the uncensored track text — flag incl
 
 Run::
 
-    uv run task5/solve_task5.py
+    uv run python task5/solve_task5.py
 """
 
 from __future__ import annotations

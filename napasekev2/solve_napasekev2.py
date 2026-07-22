@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""XMSS^MT-MD5 one-time-key-reuse forgery against "NaPaseke v2.0" (napasekev2).
+"""Historical race-based XMSS^MT-MD5 forgery for "NaPaseke v2.0".
+
+This is not the final live exploit. It preserves the earlier two-registration race
+against the source-snapshot target ``vipuser``; the deployed target was ``kopatych``
+and the reliable solved path is ``solve/solve_seqstall.py`` (SIGALRM stall plus one
+normal signature). The WOTS+/R-grinding mathematics below remains useful, but use
+that final solver to reproduce the captured flag.
 
 Bug (src/commands.c:register_user, marked "// OOOPS!"): the server signs the
 new user's nickname with its global XMSSMT key, reading the shared signing
@@ -21,23 +27,31 @@ signatures under the same OTS key for messages M1, M2, we can forge a valid
 signature for a third message M3 on any chain i where
 `min(digit_i(M1), digit_i(M2)) <= digit_i(M3)`, by hashing forward from
 whichever reveal is smaller. All chains must be coverable simultaneously.
-The seeded VIP account is always named "vipuser" (database.c,
-seed_default_vip_users) -- that is our fixed forgery target.
+The preserved source snapshot seeds a VIP account named "vipuser" (database.c,
+seed_default_vip_users), which is this historical branch's fixed forgery target.
 
 With only 2 racing signatures (the server host only ever lets ~2 concurrent
-registrations slip through before the update-conflict SIGKILL fires -- most
-likely a 2-vCPU box), full domination of "vipuser"'s digest across all 18
-WOTS chains succeeds only ~1 in ~1600 collisions (measured empirically). So
-this script repeats the whole cycle -- race, check domination, forge, login
--- against as many parallel server instances as are available until one
-epoch's digest happens to be dominated, then logs in as "vipuser" and reads
-its wall post (the flag). Runs indefinitely; intended to be launched once
-per available port and left running.
+registrations slip through before the update-conflict SIGKILL fires), the two
+random nicknames dominate "vipuser"'s fixed digest only ~1/1600 per race --
+that was the old luck-based 13h campaign.
+
+THE SMART FIX (this version): the message-hash randomizer R is copied verbatim
+from the token by the verifier and never checked (xmss_commons.c:
+xmssmt_core_sign_open -> hash.c: hash_message), i.e. R is ATTACKER-CONTROLLED.
+So after ONE won race we don't gamble -- we GRIND R* offline until the target
+"vipuser" digest is dominated by the two signatures' per-chain minima (see
+try_forge). Median ~3e5 MD5s (sub-second); with a per-race grind cap and
+re-race on the rare miss the expected number of races to win is ~1.05 (vs
+~1600). The Python XMSS-MD5 implementation is checked byte-for-byte against a
+captured real server signature in ``solve/xmss_md5.py``. The optional C harness in
+``solve/offline_harness/`` documents a second intended cross-check, but cannot run
+from a clean checkout because its driver and most reference C sources are absent.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 import re
 import socket
@@ -47,7 +61,7 @@ import threading
 import time
 
 HOST = "napaseke-m9ybjl6b.avitoctf.ru"
-INVITE = "E3MPQmoiWnaRkA35E8yqwg"
+INVITE = os.environ.get("NAPASEKE_INVITE", "")
 TARGET_USER = b"vipuser"
 _TOKEN_RE = re.compile(rb"HoneyPass token:\s*([0-9a-fA-F]+)")
 
@@ -129,8 +143,20 @@ def wots_chains(sig: bytes) -> list[bytes]:
     return [sig[i * N : (i + 1) * N] for i in range(WOTS_LEN)]
 
 
-def try_forge(pub_root: bytes, pub_seed: bytes, sigs: list[bytes]) -> bytes | None:
-    """Forge a signature for TARGET_USER from >=2 same-index racing sigs."""
+def try_forge(
+    pub_root: bytes, pub_seed: bytes, sigs: list[bytes], grind_cap: int = 200_000_000
+) -> bytes | None:
+    """Forge a signature for TARGET_USER from >=2 same-index racing sigs.
+
+    THE SMART PART -- grind R*. The message-hash randomizer R is taken verbatim
+    from the token by the verifier (xmss_commons.c: xmssmt_core_sign_open ->
+    hash.c: hash_message) and is never checked, so it is attacker-controlled.
+    Rather than praying that the two *random* nicknames dominate the server's
+    fixed target (~1/1600 per race -> the old 13h campaign), we resample R*
+    until the "vipuser" target digest is dominated by the two signatures'
+    per-chain minima. Median ~3e5 MD5s (sub-second); one won race almost always
+    suffices. Returns None only if grind_cap is exhausted (discard, re-race).
+    """
     if len(sigs) < 2:
         return None
     idx0, r0, layers0, _ = parse_sig(sigs[0])
@@ -145,7 +171,29 @@ def try_forge(pub_root: bytes, pub_seed: bytes, sigs: list[bytes]) -> bytes | No
     if len(known) < 2:
         return None
 
-    target_lengths = chain_lengths(hash_message(r0, pub_root, idx0, TARGET_USER))
+    mins = [min(lengths[i] for lengths, _ in known) for i in range(WOTS_LEN)]
+
+    # --- grind R* so the fixed target 'vipuser' becomes dominated ----------
+    prefix = PAD_HASH.to_bytes(PADDING_LEN, "big")
+    suffix = pub_root + idx0.to_bytes(N, "big") + TARGET_USER
+    r_star = target_lengths = None
+    ctr = random.getrandbits(96)
+    for _ in range(grind_cap):
+        ctr = (ctr + 1) & ((1 << 128) - 1)
+        cand = ctr.to_bytes(N, "big")
+        d = hashlib.md5(prefix + cand + suffix).digest()[:N]
+        if any(d[i] < mins[i] for i in range(WOTS_LEN1)):
+            continue
+        csum = sum(WOTS_W - 1 - d[i] for i in range(WOTS_LEN1))
+        chi, clo = (csum >> 8) & 0xFF, csum & 0xFF
+        if chi < mins[16] or clo < mins[17]:
+            continue
+        r_star = cand
+        target_lengths = [*list(d[:WOTS_LEN1]), chi, clo]
+        break
+    if r_star is None or target_lengths is None:
+        return None  # grind cap hit -> unusable this epoch, race again
+
     idx_tree, idx_leaf = idx0 >> TREE_HEIGHT, idx0 & ((1 << TREE_HEIGHT) - 1)
     ots_addr = [0, idx_tree >> 32, idx_tree & 0xFFFFFFFF, 0, idx_leaf, 0, 0, 0]
 
@@ -156,13 +204,13 @@ def try_forge(pub_root: bytes, pub_seed: bytes, sigs: list[bytes]) -> bytes | No
             if lengths[i] <= target_lengths[i] and (best is None or lengths[i] > best[0]):
                 best = (lengths[i], chains[i])
         if best is None:
-            return None  # not dominated -> this epoch is unusable
+            return None
         start, val = best
         addr = list(ots_addr)
         addr[5] = i
         forged.append(gen_chain(val, start, target_lengths[i] - start, pub_seed, addr))
 
-    parts = [idx0.to_bytes(INDEX_BYTES, "big"), r0, b"".join(forged), layers0[0][1]]
+    parts = [idx0.to_bytes(INDEX_BYTES, "big"), r_star, b"".join(forged), layers0[0][1]]
     for layer in range(1, D):
         parts += [layers0[layer][0], layers0[layer][1]]
     parts.append(TARGET_USER)
@@ -292,10 +340,13 @@ def run(port: int, n_race: int = 8, max_epochs: int = 1_000_000) -> bytes | None
         if len(sigs) < 2:
             continue  # no racy collision this round -- cheap, retry immediately
 
-        forged = try_forge(pub_root, pub_seed, sigs)
+        # Grind R* (cap ~25M ~= <70s pure-Python; ~4s on a C grinder). ~90%+
+        # of collisions forge within this cap; on the rare miss we just let the
+        # epoch self-destruct and race again -> expected races to win ~1.05.
+        forged = try_forge(pub_root, pub_seed, sigs, grind_cap=25_000_000)
         print(
             f"[port {port} epoch {epoch}] collision of {len(sigs)} sigs, "
-            f"forge={'OK' if forged else 'insufficient coverage'}",
+            f"forge={'OK' if forged else 'grind cap hit -> re-race'}",
             file=sys.stderr,
         )
         if not forged:
@@ -309,5 +360,7 @@ def run(port: int, n_race: int = 8, max_epochs: int = 1_000_000) -> bytes | None
 
 
 if __name__ == "__main__":
+    if not INVITE:
+        raise SystemExit("set NAPASEKE_INVITE (historical solver; prefer solve/solve_seqstall.py)")
     p = int(sys.argv[1]) if len(sys.argv) > 1 else 32012
     run(p)

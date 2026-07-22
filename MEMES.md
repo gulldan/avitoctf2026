@@ -53,7 +53,7 @@ caches, or coincidental bytes in compressed/binary blobs — none are eggs.
 
 > **Re-scan 2026-07-20** (after the named challenges `beeca/`, `honeyleak/`,
 > `botnet/`, `honeyvault/`, `sotolambda/`, `sotolet/` were added): a fresh
-> `meme_scan.py` sweep of each new folder found **no new eggs** — every egg-decode
+> `memes/meme_scan.py` sweep of each new folder found **no new eggs** — every egg-decode
 > hit still resolves to exactly the 5 payloads and instances cataloged below.
 > `beeca` ships only the minified `portal.js` (no egg), and the other five are
 > forensic/remote/binary artifacts without an egg-bearing source tree. The count
@@ -61,47 +61,7 @@ caches, or coincidental bytes in compressed/binary blobs — none are eggs.
 
 > Note: the decoded URLs were **not visited** (per instructions) — cataloged only.
 
----
-
-## Table 1 — Tasks
-
-Legend: ✅ solved (flag confirmed) · 🔧 method ready · ⛔ black-box exhausted.
-Egg? = does this challenge's source carry a hidden-flag easter egg.
-
-| # | Task | Category | Status | Flag | Egg? |
-|---|------|----------|--------|------|------|
-| 2 | Ghost Font | stego | ✅ | `avito{SM4RT3R_TH4N_AI}` | – |
-| 3 | Сопромёд | net / pcap | ✅ | `avito{57Icky_p4WS_Mi55_thE_Bu7ToNS}` | – |
-| 4 | Сопромёд ч.2 | web / broken auth ordering | ✅ | `avito{0Tp_ch3ck3D_beF0R3_C4PtcH4_O0PS}` | – |
-| 5 | OnMute | web / regex lastIndex desync | 🔧 | method: bot `/original 4` | ✅ mutedgift |
-| 6 | B2Bee | Java sandbox escape | ✅ | `avito{juSt_34Sy_biG_DISCoUNt}` | ✅ marketdone |
-| 7 | Pytome | Android WebView + deep-link | ✅ | `avito{pYThON_In_WEbv13w_1s_D4NGEroUs}` | – |
-| 8 | io_hrana | reversing (io_uring) | ✅ | `avito{tim3_1s_h0ney&hon3y_i5_7ime}` | – |
-| 9 | Нагибатор | web / pickle deserialization | ⛔ | black-box exhausted; no flag | – |
-| 10 | Майя / Майес | crypto (word-wise SPN) | 🔧 | method ready; flag not captured (no source) | – |
-| 11 | Government | web / broken access control | ✅ | `avito{hoN3Y_BAdgERS_allOwEd_1N_beehIVe_N0w}` | – (see note) |
-| 12 | Undercover | Linux privesc (cron→SGID→OTP) | ✅ | `avito{the_OP3ra7I0n_wAS_suCce5sfuL}` | – |
-| 13 | Brainwash | web / AimQL RCE (CVE-2024-2195) | ✅ | `avito{3Xperim3n7s_aR3_unREL1aBl3_BU7_rcE_N3V3R_liEs}` | – |
-| 14 | Brainwash | k8s / ephemeral containers | ✅ | `avito{wHa7_PaS5Es_For_trUth_1S_Eph3mERaL}` | – |
-| 15 | Brainwash | k8s / node proxy → kubelet | ✅ | `avito{Learn_Th3_ORCh3S7r4TioN_Not_The_ind0ctr1n4t1on}` | – |
-| 16 | SmartHive | web / log race + replaceFirst mask | ✅ | `avito{SmAr7_G4te_meaNS_eA5y_HonEy}` | ✅ zaletay |
-| 17 | BeeSix (БИ-6) | crypto: static ECDH + prefix-MAC + padding-oracle | ✅ | `avito{mY_naMe_Is_BEEnd_j4M3S_B33nd}` | ✅ beeintel |
-| 18 | МёдХантер (invite) | web / SSRF → IMDS → .env | ✅ | `avito{ExcLu51V3_pDF_4cc3Ss_3NAblEd}` | – |
-| 19 | МёдХантер (gold star) | web / reverse (SSRF→registry→binary) | ✅ | `avito{gOLd3N_w0rk_eXp3RIEnc3_d37EctED}` | – |
-| 20 | PAMgate | Linux / PAM OOB byte-flip | ✅ | `avito{3a5Y_4DMIN_1NCREmeNt}` | – |
-| 21 | МёдХантер (sign secret) | web / dompdf RCE → S3 exfil | ✅ | `avito{med0edsk_cl0ud_dompdf_rce_via_s3_l@mbda}` | – |
-| — | slophacking (МедоИИд) | web / Go LLM-agent (prompt-injection RCE) | ✅ | `avito{5l0P_H4cK1nG_b4NN3r_1Nj3CtION_PWN}` | ✅ aitreasure |
-| — | sotek (СОТЭК) | web / Next.js (2nd-order SQLi) | ✅ | `avito{vERy_Sus_b4DGeR_Detect3d_bY_cAMerA}` | ✅ zaletay |
-| — | BeeCA | crypto + web + logic (Hard, 0 solves) | ✅ | `avito{uZUzUlEy_WeaK_CrYp7O_vIBeee}` | – (no source egg) |
-| — | Не пойман — не медоед (honeyleak) | forensics | ✅ | `avito{c0ngr4t5_0n_cr4ck1ng_th3_sh3ll}` | – (log-only artifact) |
-| — | Разбор ботнета | infra / pentest | ✅ | `avito{the_bo7ne7_15_CompL3tely_ComPRomISed}` | – (remote-only) |
-| — | HoneyVault | infra / Linux | ✅ | `avito{Un1X_SOCK3T_Race_4nD_5TICkY_SymLinK_3XP3rT}` | – (remote-only) |
-| — | СотоLambda (sotolambda) | reverse / misc | ✅ | `avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}` | – (binary artifact) |
-| — | Сотолёт (sotolet) | infra / web | ✅ | `avito{5ot0lE7_que3N_bEar1NG}` | – (remote-only) |
-
----
-
-## Table 2 — Hidden memes / easter eggs
+## Найденные мемы / пасхалки (Hidden memes)
 
 **5 distinct payloads**, all scheme = *variation-selector byte-smuggling*
 (`U+FE00–FE0F` + `U+E0100–E01EF`). Rows below are **per file instance** so nothing
@@ -156,12 +116,12 @@ is lost; the `decoded content` column shows the reward host (identical text pref
 ## Re-running the scan
 
 ```bash
-python3 meme_scan.py .                      # scan repo source (filtered to readable eggs)
-python3 meme_scan.py . 2>/dev/null | grep -v '^#'   # just the findings
+python3 memes/meme_scan.py .                      # scan repo source (filtered to readable eggs)
+python3 memes/meme_scan.py . 2>/dev/null | grep -v '^#'   # just the findings
 # live pages/JS + error-response probing done via ad-hoc crawlers (all clean)
 ```
 
-`meme_scan.py` walks every text file, finds runs of variation-selector / tag /
+`memes/meme_scan.py` walks every text file, finds runs of variation-selector / tag /
 zero-width / misc-invisible codepoints, decodes each with all four schemes, and
 prints `file:offset [scheme n=len] 'decoded'`. It also has a `--stdin` mode
 (pipe fetched HTML/JS) and a `--urls FILE` mode (fetch + scan raw served bytes).

@@ -11,7 +11,7 @@ reCAPTCHA-токен нужен лишь на одной успешной поп
 
 Run::
 
-    uv run task4/solve_task4.py [recaptcha_token]
+    uv run python task4/solve_task4.py [recaptcha_token]
 """
 
 from __future__ import annotations

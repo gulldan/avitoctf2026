@@ -33,34 +33,36 @@ Usage:
         openssl pkcs12 -in acc.p12 -passin pass:beeca -nodes -clcerts \\
           | openssl x509 -out leaf.crt
 
-        python3 recover_ca_and_forge.py leaf.crt leaf2.crt [leaf3.crt ...]
+        uv run python beeca/recover_ca_and_forge.py \
+          beeca/leaf.crt beeca/leaf2.crt [beeca/leaf3.crt ...]
 
-Dependencies: ``cryptography`` and ``gmpy2`` (``pip install cryptography gmpy2``).
-Neither is a project dependency (this repo only pins requests/numpy/pillow) and
-neither ships inline type stubs, so `ty` cannot resolve them -- the six imports
-below carry a targeted ``ty: ignore[unresolved-import]`` rather than a blanket
-per-file suppression.
+Dependencies are installed by the repository's root ``uv sync``.
 """
 
 import hashlib
 import sys
+from pathlib import Path
 
-from cryptography import x509  # ty: ignore[unresolved-import]
-from cryptography.hazmat.primitives import hashes, serialization  # ty: ignore[unresolved-import]
-from cryptography.hazmat.primitives.asymmetric import rsa  # ty: ignore[unresolved-import]
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from gmpy2 import gcd as ggcd  # ty: ignore[unresolved-import]
 from gmpy2 import isqrt as gisqrt  # ty: ignore[unresolved-import]
 from gmpy2 import mpz  # ty: ignore[unresolved-import]
 
 E = 65537
 SHA256_DI_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+OUTPUT_DIR = Path(__file__).resolve().parent
 
 
 def load_leaf(path):
     cert = x509.load_pem_x509_certificate(open(path, "rb").read())
     tbs = cert.tbs_certificate_bytes
     sig = int.from_bytes(cert.signature, "big")
-    n_leaf = cert.public_key().public_numbers().n
+    public_key = cert.public_key()
+    if not isinstance(public_key, rsa.RSAPublicKey):
+        raise TypeError("expected an RSA leaf certificate")
+    n_leaf = public_key.public_numbers().n
     return tbs, sig, n_leaf
 
 
@@ -186,7 +188,7 @@ def forge_admin(ca_key):
         .subject_name(subject)
         .issuer_name(issuer)
         .public_key(leaf_key.public_key())
-        .serial_number(0x1000)
+        .serial_number(0x2000)  # отличается от leaf-серийников 0x1000/0x1001
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=29))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
@@ -209,18 +211,18 @@ def forge_admin(ca_key):
         )
         .sign(ca_key, hashes.SHA256())
     )
-    open("admin_forged.crt", "wb").write(cert.public_bytes(serialization.Encoding.PEM))
-    open("admin_forged.key", "wb").write(
+    cert_path = OUTPUT_DIR / "admin_forged.crt"
+    key_path = OUTPUT_DIR / "admin_forged.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
         leaf_key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
             serialization.NoEncryption(),
         )
     )
-    print("[+] wrote admin_forged.crt / admin_forged.key  (CN=admin, signed by recovered CA)")
-    print(
-        "    curl --cert admin_forged.crt --key admin_forged.key https://admin-bv5kavo6.beeca.avitoctf.ru/"
-    )
+    print(f"[+] wrote {cert_path} / {key_path}  (CN=admin, signed by recovered CA)")
+    print(f"    curl --cert {cert_path} --key {key_path} https://admin-bv5kavo6.beeca.avitoctf.ru/")
 
 
 if __name__ == "__main__":

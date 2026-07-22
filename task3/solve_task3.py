@@ -14,7 +14,7 @@ Approach (see ``sopromed_task3_writeup.md`` §3 for the full reasoning):
 
 Run::
 
-    uv run task3/solve_task3.py [pcap_path]
+    uv run python task3/solve_task3.py [pcap_path]
 """
 
 from __future__ import annotations

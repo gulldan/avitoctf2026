@@ -40,8 +40,8 @@ never OOM-kills the whole container (which would take ``cdn`` down with it).
 
 Usage::
 
-    python3 solve_filter2.py https://filter2-srv-XXXX.avitoctf.ru
-    python3 solve_filter2.py http://127.0.0.1:8080      # local docker replica
+    uv run python filter/solve_filter.py https://filter-srv-XXXX.avitoctf.ru
+    uv run python filter/solve_filter.py http://127.0.0.1:8080  # local docker replica
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ def exploit(
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: python3 solve_filter2.py <base_url>", file=sys.stderr)
+        print("usage: uv run python filter/solve_filter.py <base_url>", file=sys.stderr)
         return 2
     base_url = argv[1].rstrip("/")
     print("[*] attacking %s" % base_url)

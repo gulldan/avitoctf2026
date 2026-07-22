@@ -10,8 +10,8 @@ Foothold recap:
     param (repo=/data/repo) and reading it back over :80.
 
 Usage:
-  python3 rce_exec.py <host> '<shell command>'
-  python3 rce_exec.py <host> --seed              # (re)create a run if num_runs==0
+  uv run python task13/rce_exec.py <host> '<shell command>'
+  uv run python task13/rce_exec.py <host> --seed  # (re)create a run if num_runs==0
 """
 
 import base64

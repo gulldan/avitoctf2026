@@ -21,7 +21,7 @@ spatially instead of temporally:
 
 Run::
 
-    uv run task2/decode_ghost.py [ghost_screenshot.png] -o ghost_decoded.png
+    uv run python task2/decode_ghost.py task2/ghost_screenshot.png -o task2/ghost_decoded.png
     # -> SM4RT3R / TH4N AI  =>  avito{SM4RT3R_TH4N_AI}
 """
 

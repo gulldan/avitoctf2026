@@ -13,11 +13,14 @@ known bucket's virtual-hosted endpoint and lists its contents directly.
 import datetime
 import hashlib
 import hmac
+import os
 import urllib.error
 import urllib.request
 
-ACCESS = "YCAJE6hJjOgIlF3PuygPg3FVu"
-SECRET = "YCPNni3w1j_GOTNT_tpBs2CWGxZZxqW1GYsKNw06"
+ACCESS = os.environ.get("STORAGE_ACCESS_KEY")
+SECRET = os.environ.get("STORAGE_SECRET_KEY")
+if not ACCESS or not SECRET:
+    raise SystemExit("set STORAGE_ACCESS_KEY and STORAGE_SECRET_KEY from the task18 leak")
 REGION = "ru-central1"
 HOST = "storage.yandexcloud.net"
 SERVICE = "s3"

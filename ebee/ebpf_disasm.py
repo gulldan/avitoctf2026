@@ -7,7 +7,7 @@ and helper-function calls. It was used to read the "eBeeKeys" keylogger
 program instruction-by-instruction and recover its XOR obfuscation formula
 (``ascii = (X & 0xff) ^ (X >> 8) ^ 0x31``), documented in ebee_writeup.md §5.
 
-Usage: ``python3 ebpf_disasm.py <raw_bytecode_file>``
+Usage: ``uv run python ebee/ebpf_disasm.py <raw_bytecode_file>``
 """
 
 import struct

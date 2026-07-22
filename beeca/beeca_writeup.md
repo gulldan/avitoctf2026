@@ -1,309 +1,288 @@
-# BeeCA — write-up
+# BeeCA — разбор
 
-**Flag:** `avito{uZUzUlEy_WeaK_CrYp7O_vIBeee}`
-**Class:** Crypto + Web + Logic · **Difficulty:** Hard · **Points:** 1000 · **Teams solved:** 0
-**Author:** @v1ru55, SPbCTF
+**Флаг:** `avito{uZUzUlEy_WeaK_CrYp7O_vIBeee}`
+**Класс:** Crypto + Web + Logic (крипто + веб + логика) · **Сложность:** Hard ·
+**Очки:** 1000 · **Решило команд:** 0
+**Автор:** @v1ru55, SPbCTF
 
-**One-paragraph story of the solve.** The prize (the "Первопромпт" / First Prompt) lives behind an
-mTLS wall that only opens for a client certificate whose subject is exactly `CN=admin`. You can only
-get certificates named after *your own* verified Google email, and the naive "self-sign a CN=admin
-cert" is rejected because the wall does real chain validation. So the whole challenge is: **how do
-you obtain a certificate the BeeCA certificate authority never intended to issue?** The answer is a
-three-bug chain — (1) an *unauthenticated* internal issuer endpoint lets us instantly self-approve
-enrollments, (2) a decline-and-re-enroll logic flaw lets us mint **two** distinct CA-signed leaves
-from a single account, and (3) two signatures are enough to algebraically **recover the CA's public
-modulus `N` from the signatures themselves** — even at `e=65537` — after which the hand-rolled CA
-key factors instantly and we forge our own `CN=admin` cert.
+## В двух словах (без терминов)
+
+Есть закрытая «дверь» (админский сайт), которая открывается только тому, кто предъявит специальный
+электронный пропуск — **сертификат** с именем ровно `admin`. Пропуска выдаёт «бюро пропусков» (центр
+сертификации BeeCA), и оно печатает пропуск строго на **твою** почту — не на «admin». Самому нарисовать
+пропуск нельзя: дверь проверяет, что он настоящий, с печатью бюро.
+
+Мы обошли это так. Сначала нашли служебный «черный вход» в бюро, который вообще ничего не спрашивает —
+через него можно мгновенно самому себе одобрить выдачу пропуска. Потом заметили, что можно выпустить
+**два** разных настоящих пропуска на одну учётку. А дальше — математический трюк: **две настоящие печати
+бюро выдают его секрет**. По двум подписям мы вычислили секретный ключ печати бюро, сами «стали бюро» и
+напечатали себе пропуск с именем `admin`. Дверь открылась — за ней флаг.
+
+Три ярлыка из условия (Crypto + Web + Logic) — это буквально три звена этой цепочки.
 
 ---
 
-## 1. The challenge
+## 1. Что за задача
 
-> "Badgers found infrastructure built by a swarm of *vibecoder bees*."
+> «Медоеды нашли инфраструктуру, построенную роем *пчёл-вайбкодеров*.» (vibecoder — тот, кто пишет код
+> «на вайбе», наспех, лишь бы работало.)
 
-- **Portal** `portal-bv5kavo6.beeca.avitoctf.ru` — a React/Vite SPA that issues **named client
-  certificates**. You log in with Google, request a cert, and (after approval) download a
-  `beeca-client.p12`. The certificate's `CN` is your verified email.
-- **Admin host** `admin-bv5kavo6.beeca.avitoctf.ru` — serves the *Первопромпт* and is reachable
-  **only** with a client certificate whose `CN=admin`. Only the "IT-lead bee" has one.
-- **Goal:** present a `CN=admin` certificate to the admin host and read the First Prompt (which ends
-  with the flag).
+Приз — **«Первопромпт»** (First Prompt) — лежит за стеной, которую можно пройти только с электронным
+пропуском на имя `admin`. Что нам дали и как всё устроено:
 
-The three category tags (Crypto + Web + Logic) are a strong hint up front: the solution is a chain,
-not a single trick.
+- **Портал** `portal-bv5kavo6.beeca.avitoctf.ru` — сайт (React/Vite SPA), который выдаёт **именные
+  клиентские сертификаты**. Заходишь через Google, просишь сертификат, и после одобрения скачиваешь файл
+  `beeca-client.p12`. Имя в сертификате (`CN`) — это твоя проверенная почта.
+- **Админ-хост** `admin-bv5kavo6.beeca.avitoctf.ru` — отдаёт «Первопромпт» и пускает **только** по
+  сертификату, у которого `CN=admin`. Такой есть лишь у «пчелы-IT-лида».
+- **Цель:** предъявить админ-хосту сертификат `CN=admin` и прочитать Первопромпт (он оканчивается флагом).
 
-## 2. Recon — mapping the certificate system
+> Мини-словарь. **Сертификат** — электронный «паспорт»: файл, где написано имя владельца (поле `CN` —
+> Common Name, «основное имя») и стоит криптографическая **подпись** удостоверяющего центра. **Удостоверяющий
+> центр (CA, Certificate Authority)** — «бюро пропусков»: единственный, кто ставит подпись, которой все
+> доверяют. **mTLS (взаимный TLS)** — обычный HTTPS, только тут не только сайт доказывает браузеру, кто он,
+> но и клиент предъявляет серверу свой сертификат-паспорт. Дверь `admin-` работает по mTLS: без правильного
+> паспорта не пустит.
 
-**Portal API** (recovered from the minified bundle `portal.js` / `/static/assets/index-*.js`):
+Три категории в условии (Crypto + Web + Logic) — сильная подсказка: решение — **цепочка**, а не один трюк.
 
-| Endpoint | What it does |
+## 2. Разведка — что мы увидели
+
+**API портала** (вытащили из минифицированного бандла `portal.js`):
+
+| Эндпоинт | Что делает |
 |---|---|
-| `GET /api/me` | session state: `{authenticated, email, enrollment:{uuid, cn, status, serial}}` |
-| `POST /api/enroll` | creates/returns an enrollment. **`CN` = your verified SSO email, verbatim.** Keypair is generated **server-side** — the JSON response even hands back `private_key_pem`. Status starts `pending` (needs operator approval). Calling it again on an existing `pending`/`issued` enrollment returns the **same** persisted record (idempotent), not a new one. |
-| `GET /api/cert` | once `issued`, downloads `beeca-client.p12` (password `beeca`) |
-| `POST /api/feedback` | "speed up my review"; a moderator supposedly reads it |
-| `GET /login`, `POST /logout` | real Google OAuth2 |
-| `POST /internal/cert?uuid=&action=approve\|decline` | the **operator** approve/decline action — lives on an *internal* host |
+| `GET /api/me` | состояние сессии: `{authenticated, email, enrollment:{uuid, cn, status, serial}}` |
+| `POST /api/enroll` | создаёт/возвращает заявку на сертификат. **`CN` = твоя проверенная почта, дословно.** Ключ генерится **на сервере** — в JSON даже возвращается `private_key_pem`. Статус сперва `pending` (нужно одобрение оператора). Повторный вызов на существующей заявке возвращает **ту же** запись (идемпотентно), а не новую. |
+| `GET /api/cert` | когда статус `issued` — качает `beeca-client.p12` (пароль `beeca`) |
+| `POST /api/feedback` | «ускорьте проверку»; якобы читает модератор |
+| `GET /login`, `POST /logout` | настоящий Google OAuth2 |
+| `POST /internal/cert?uuid=&action=approve\|decline` | действие **оператора** одобрить/отклонить — живёт на *внутреннем* хосте |
 
-The session is an **HS256 JWT**. We attacked it hard (rockyou + masks ≤7 alnum + themed guesses for
-the secret; `alg:none`/`None`/empty-key confusion; `jwk`/`jku`/`kid` header injection) — **all
-rejected**. The JWT is genuinely unforgeable, so we cannot mint an arbitrary-email session. That
-matters because it means we cannot simply log in "as admin".
+> Мини-словарь. **Эндпоинт** — адрес-ручка API, куда шлёшь запрос. **Идемпотентный** — «сколько ни жми,
+> результат один и тот же»: повторный вызов не создаёт новую запись, а отдаёт уже сохранённую. **UUID** —
+> длинный случайный идентификатор (например `550e8400-...`). **Serial (серийный номер)** — номер сертификата,
+> как номер бланка паспорта.
 
-**The admin host's mTLS gate**, probed with `openssl s_client` (raw dumps in `artifacts/`):
+**Сессия — это JWT HS256.** JWT (JSON Web Token) — подписанный «билетик», в котором зашита твоя личность;
+подпись не даёт его подделать, если не знаешь секрет. Мы били по нему сильно (перебор секрета: rockyou +
+короткие маски ≤7 символов + тематические догадки; трюки `alg:none`/пустой ключ; инъекция заголовков
+`jwk`/`jku`/`kid`) — **всё отбито**. Билет реально не подделать снаружи. Важный вывод: **войти «как admin»
+просто так нельзя.**
 
-- The TLS `CertificateRequest` message leaks the trusted CA's subject: **`CN=BeeCA, O=BeeCA`** — the
-  *only* CA accepted. Any client cert we present must chain to it.
-- The gate does **real chain validation** first, then an **exact `CN == "admin"`** check in the app.
-  Three distinct 403 responses prove all three code paths exist:
+**Стена mTLS у админ-хоста** (щупали через `openssl s_client`):
 
-  | Cert presented | Response |
+- TLS-сообщение `CertificateRequest` выдаёт имя доверенного CA: **`CN=BeeCA, O=BeeCA`** — это единственный
+  принимаемый центр. Любой наш сертификат обязан «вести» к нему.
+- Дверь сначала делает **настоящую проверку цепочки**, потом — **точную сверку `CN == "admin"`** в приложении.
+  Три разных 403-ответа доказывают, что есть все три ветки кода:
+
+  | Что предъявили | Ответ |
   |---|---|
-  | none | `Для доступа требуется клиентский сертификат BeeCA.` (mTLS layer, `Connection: close`) |
-  | self-signed `CN=admin` (not chained to BeeCA) | `Клиентский сертификат не прошёл TLS-проверку.` (chain validation failed) |
-  | valid BeeCA leaf, wrong CN | `Сертификат подлинный … (CN='shadowklesh@gmail.com'), но прав администратора недостаточно: требуется CN=admin.` |
+  | ничего | `Для доступа требуется клиентский сертификат BeeCA.` (уровень mTLS) |
+  | самоподписанный `CN=admin` (не от BeeCA) | `Клиентский сертификат не прошёл TLS-проверку.` (провал проверки цепочки) |
+  | настоящий лист BeeCA, но чужой CN | `Сертификат подлинный … (CN='shadowklesh@gmail.com'), но прав администратора недостаточно: требуется CN=admin.` |
 
-That third message is the key oracle: a **validly-chained** cert reaches the app, and the app
-demands `CN` *exactly* equal to `admin`.
+Третий ответ — золотой «оракул»: сертификат с правильной подписью **доходит до приложения**, и приложение
+требует, чтобы `CN` был **ровно** `admin`.
 
-**Facts confirmed by direct testing (not yet a working plan, just the map):**
+> Мини-словарь. **Цепочка (chain)** и её проверка: дверь смотрит, что твой сертификат подписан именно BeeCA.
+> **Самоподписанный** — сертификат, который ты подписал сам себе (никакого доверия к нему нет). **Лист (leaf)** —
+> конечный сертификат владельца (в отличие от сертификата самого CA). **Оракул** — источник, который на твой
+> вопрос отвечает «да/нет» и тем самым что-то подсказывает.
 
-- Enroll **ignores** any client-supplied `cn`/`email`/`subject`/`name` (query, JSON body, or
-  `X-Forwarded-Email` header) — CN is strictly the SSO email.
-- The issued leaf is `BasicConstraints: CA:FALSE (critical)` + `KeyUsage: Digital Signature` only,
-  EKU `clientAuth`.
-- `/api/feedback` is a latency-flat async **log sink**.
-- Header spoofing (`X-SSL-Client-CN: admin`, `X-Forwarded-Client-Cert`, `X-SSL-CLIENT-S-DN`, …) is
-  ignored — the app reads the genuine nginx `$ssl_client_s_dn_cn`, not request headers.
-- The **CA certificate is not downloadable anywhere** (swept ~40 paths / subdomains / ports on all
-  three vhosts; `.p12` and `/api/cert` are leaf-only, no chain param works).
+**Факты, подтверждённые прямыми тестами** (это ещё не план, а карта местности):
 
-Recon conclusion: we can't rename our cert, can't forge the session, and can't download the CA
-directly. Whatever the real bug is, it has to turn these individually-solid-looking facts into a
-chain. That framing drove the rest of the solve — detailed thread-by-thread in §3.
+- `enroll` **игнорирует** любые присланные клиентом `cn`/`email`/`subject`/`name` (в query, теле, заголовке
+  `X-Forwarded-Email`) — CN строго равен SSO-почте.
+- Выданный лист — `BasicConstraints: CA:FALSE (critical)` + только `KeyUsage: Digital Signature`, EKU `clientAuth`.
+  (То есть им нельзя ничего подписывать — он «конечный», не «начальник».)
+- Подмена заголовков (`X-SSL-Client-CN: admin` и т.п.) игнорируется — приложение читает настоящий nginx-овский
+  `$ssl_client_s_dn_cn`, а не заголовки запроса.
+- **Сам сертификат CA нигде не скачать** (прочесали ~40 путей/поддоменов/портов на всех трёх vhost'ах;
+  `.p12` и `/api/cert` отдают только лист, параметр «цепочка» не работает).
 
-## 3. How we got there (hypothesis logic)
+Вывод разведки: переименовать свой сертификат нельзя, сессию подделать нельзя, CA напрямую не скачать. Значит
+настоящий баг должен **связать эти по отдельности крепкие факты в цепочку**. Эта мысль и вела всё решение дальше.
 
-This challenge took the longest not because any single step was hard, but because **several
-plausible-looking bugs turned out to be dead ends**, and the actual chain only became visible after
-closing all of them. Six threads, in the order they were actually run down:
+## 3. Как мы дошли до решения (главный раздел)
 
-### Thread A — can we just *become* admin without exploiting anything?
+Задача заняла больше всего времени не потому, что какой-то шаг сложен, а потому что **несколько
+правдоподобных «багов» оказались тупиками**, и настоящая цепочка стала видна лишь после того, как все они
+закрыты. Восемь ниток, в порядке, в котором мы их реально распутывали.
 
-- **Observation.** `enroll` returns whatever the SSO layer hands it; nothing in the request body
-  controls `cn`.
-- **Hypothesis.** Maybe some SSO edge case (display name, local-part-only email, a `+admin` alias,
-  an unverified secondary email) lets the returned `cn` be something other than the full verified
-  address.
-- **Test.** Did a real Google OAuth2 login and inspected the resulting `/api/me`/enroll record.
-- **Result — dead end.** `cn` came back as the **full verified email, verbatim**
-  (`shadowklesh@gmail.com`). You cannot register a real Google account whose email is literally
-  `admin` without owning/verifying a domain (a real-world cost, not a request-crafting trick). CN
-  control via SSO identity is closed.
-- **Also tried and refuted in the same pass:** JWT secret brute force (rockyou + themed masks),
-  `alg:none`, `jwk`/`jku` header injection, every plausible spoofable header
-  (`X-SSL-Client-CN`, `X-Forwarded-Client-Cert`, …). All rejected — the app trusts only nginx's own
-  `$ssl_client_s_dn_cn`, and the JWT is genuinely unforgeable from outside.
+### Нитка A — можно ли просто «стать admin» без всякого взлома?
 
-### Thread B — is there a sub-CA / self-signing path?
+**Наблюдение.** `enroll` возвращает то, что дал ему слой входа через Google; тело запроса на `cn` не влияет.
+**Гипотеза.** Вдруг какой-то крайний случай Google-входа (display name, локальная часть почты, alias `+admin`,
+неподтверждённая вторая почта) даст `cn`, отличный от полной почты. **Проверка.** Сделали реальный вход через
+Google, посмотрели запись `/api/me`. **Итог — тупик.** `cn` вернулся полной проверенной почтой
+(`shadowklesh@gmail.com`). Зарегистрировать реальный Google-аккаунт с почтой буквально `admin` без владения
+доменом нельзя. Контроль над CN через личность закрыт. (Заодно тут же отбиты подделка JWT, `alg:none`,
+инъекции заголовков и все спуфы — см. §2.)
 
-- **Observation.** `POST /api/enroll` hands back `private_key_pem` for our own leaf.
-- **Hypothesis.** If the issued certificate had `BasicConstraints: CA:TRUE` (or a permissive
-  `pathlen`), we could use our own already-issued leaf as an intermediate and self-sign a fresh
-  `CN=admin` certificate — no CA compromise needed at all.
-- **Test.** Parsed our own leaf's X.509 extensions.
-- **Result — dead end.** `BasicConstraints: CA:FALSE (critical)`, `KeyUsage: digitalSignature` only,
-  `EKU: clientAuth`. The issuer correctly marks every leaf as a pure end-entity cert; it cannot sign
-  anything. No sub-CA trick is available.
+### Нитка B — а нет ли пути «сам себе под-CA»?
 
-### Thread C — can we just get the CA cert/key directly?
+**Наблюдение.** `POST /api/enroll` отдаёт нам `private_key_pem` нашего же листа. **Гипотеза.** Если бы у листа
+стоял `BasicConstraints: CA:TRUE`, мы бы его использовали как «промежуточный центр» и сами подписали бы себе
+`CN=admin` — вообще без взлома CA. **Проверка.** Разобрали расширения нашего X.509-листа. **Итог — тупик.**
+`CA:FALSE (critical)`, только `digitalSignature`, `EKU: clientAuth`. Каждый лист корректно помечен как
+конечный — им ничего не подписать. Под-CA нет.
 
-- **Observation.** Self-hosted PKI demos frequently leak the CA bundle somewhere (a static path, a
-  CRL distribution point, an internal DNS record, a debug endpoint).
-- **Hypothesis.** The CA cert (or, better, the CA key) might be reachable by URL-guessing across all
-  three vhosts and a handful of ports.
-- **Test.** Swept ~40 candidate paths/subdomains/ports (`/ca.crt`, `/ca-bundle.pem`, `/.well-known/`,
-  chain params on `/api/cert`, CRL/OCSP paths, etc.) on `portal-`, `admin-`, and any discovered
-  internal hosts.
-- **Result — dead end.** Nothing found anywhere. This was actually useful information: it told us N
-  would have to be **recovered**, not read off disk, which is what pointed the crypto lane at
-  signature-based recovery in Thread F.
+### Нитка C — а нельзя ли просто добыть сертификат/ключ CA напрямую?
 
-### Thread D — nginx Host/SNI confusion (a real bug, but not *the* bug)
+**Наблюдение.** Самодельные PKI-демки часто где-то «светят» связку CA (статичный путь, CRL, внутренний DNS,
+дебаг-ручка). **Гипотеза.** Ключ (или хоть сертификат) CA достаётся угадыванием URL. **Проверка.** Прочесали
+~40 кандидатов путей/поддоменов/портов на всех трёх vhost'ах. **Итог — тупик.** Ничего. Но это оказалось
+полезно: значит `N` (модуль CA) придётся **вычислять**, а не читать с диска — что позже и направило крипто-линию
+на восстановление по подписям (нитка G).
 
-- **Observation.** `admin-bv5kavo6` and `portal-bv5kavo6` resolve to the **same IP**
-  (`93.77.163.176`). nginx typically selects a `server{}` block by SNI, and some setups only check
-  `Host` loosely against it.
-- **Hypothesis.** Sending a mismatched `Host` header while SNI-connecting to the admin vhost might
-  route us into a different, less-protected backend — possibly one that skips the mTLS check.
-- **Test.** `curl -H "Host: certissue-bv5kavo6.internal" https://admin-bv5kavo6.beeca.avitoctf.ru/`
-  and variants (including the literal other real hostname as `Host`).
-- **Result — real bug, but a dead end for reaching admin content.** An unrecognized `Host` value
-  *does* fall through to an nginx `default_server` with **no mTLS requirement at all** — but it only
-  proxies to the same **portal** backend (`/api/me`, `/api/feedback`), not a separate admin
-  application, and `/internal/cert` isn't registered on that backend process at all (a clean
-  app-level 404, not an nginx block) — proving the internal issuer lives on a genuinely different
-  service. Sending the *other* real hostname explicitly gets a **third** behavior: a hardcoded nginx
-  `403`, i.e. an explicit deny rule for the known name while the catch-all fallback was left open.
-  Net effect: interesting nginx hygiene bug, zero new capability toward `CN=admin` — **but it planted
-  the idea that plays out in Thread E**: several *named* services clearly share this one edge IP,
-  they're just routed by name.
+### Нитка D — путаница Host/SNI в nginx (реальный баг, но не *тот*)
 
-### Thread E — Bug 1: the internal issuer, reached by SNI+Host together
+**Наблюдение.** `admin-bv5kavo6` и `portal-bv5kavo6` резолвятся в **один IP** (`93.77.163.176`). nginx выбирает
+блок сайта по **SNI** (имя сайта, которое клиент называет ещё на этапе TLS-рукопожатия), и иногда `Host`
+проверяется слабо. **Гипотеза.** Прислав «неправильный» `Host` админ-хосту, можно попасть в другой, менее
+защищённый бэкенд. **Проверка.** `curl -H "Host: …"` и варианты. **Итог — реальный баг, но тупик для доступа к
+админке.** Неизвестный `Host` действительно проваливается в `default_server` **без mTLS** — но проксирует в тот
+же **портал**, а не в админ-приложение; `/internal/cert` там вообще не зарегистрирован (чистый 404 приложения).
+Значит внутренний выдаватель — отдельный сервис. Практической пользы для `CN=admin` ноль — **но родилась идея
+для нитки E**: несколько *именованных* сервисов явно делят один пограничный IP и разводятся по имени.
 
-- **Observation.** The bundle references an internal host name,
-  `certissue-bv5kavo6.internal`, that does not resolve publicly. Thread D already showed this IP
-  hosts multiple named vhosts selected by SNI/Host.
-  ```
-  $ dig +short admin-bv5kavo6.beeca.avitoctf.ru    # 93.77.163.176
-  $ dig +short portal-bv5kavo6.beeca.avitoctf.ru   # 93.77.163.176  (same IP)
-  ```
-- **Hypothesis.** If `certissue-bv5kavo6.internal` is "protected" purely by not being in public DNS,
-  and it's colocated on the same edge IP as everything else, then forcing **both** the TLS SNI and
-  the HTTP `Host` to that name should route us straight to it — no auth needed, since "internal"
-  here means "not advertised," not "network-isolated."
-- **Why the earlier bare `-H "Host:"` attempt (Thread D) wasn't enough:** that only overrode the
-  `Host` header while SNI stayed on the admin/portal name, which nginx used to pick the vhost — you
-  need `--resolve` (or equivalent) so the **TLS handshake itself** claims to be
-  `certissue-bv5kavo6.internal`, matching Host.
-- **Test.**
-  ```bash
-  curl -sk -X POST \
-    --resolve certissue-bv5kavo6.internal:443:93.77.163.176 \
-    "https://certissue-bv5kavo6.internal/internal/cert?uuid=<UUID>&action=approve"
-  ```
-- **Confirmed.** `{"ok":true,"status":"issued","uuid":"<UUID>"}` — **zero authentication, zero
-  client cert.** We fully characterized it: `action` is a strict `approve|decline` enum, `uuid` must
-  reference an existing enrollment (random UUIDs → `not found`), every override param (`cn`,
-  `email`, …) is silently ignored, no other route exists on this host. It doesn't let us *rename* a
-  cert — but it lets us **instantly self-approve any enrollment we create**, collapsing the
-  multi-minute human-review delay to seconds. That speed is exactly what Thread F needs.
+### Нитка E — Баг 1: внутренний выдаватель, достижимый через SNI+Host вместе
 
-> Segmentation-by-obscurity is not segmentation: an "internal only" service that shares an edge IP is
-> one matching `SNI`/`Host` away.
+**Наблюдение.** В бандле встречается внутреннее имя `certissue-bv5kavo6.internal`, которого нет в публичном DNS.
+Нитка D уже показала: на этом IP живёт несколько сайтов, разводимых по SNI/Host.
+```
+$ dig +short admin-bv5kavo6.beeca.avitoctf.ru    # 93.77.163.176
+$ dig +short portal-bv5kavo6.beeca.avitoctf.ru   # 93.77.163.176  (тот же IP)
+```
+**Гипотеза.** Если `certissue-…` «защищён» только тем, что его нет в публичном DNS, а физически он на том же
+IP — то, назвав **и** TLS-SNI **и** HTTP-`Host` этим именем, мы попадём прямо на него. «Внутренний» тут значит
+«не афишируется», а не «сетево изолирован».
+**Почему прежней голой подмены `-H "Host:"` (нитка D) не хватило:** там мы меняли только `Host`, а SNI оставался
+на имени admin/portal, по которому nginx и выбирал сайт. Нужен `--resolve`, чтобы **само TLS-рукопожатие**
+называлось `certissue-bv5kavo6.internal`, совпадая с Host.
+**Тест.**
+```bash
+curl -sk -X POST \
+  --resolve certissue-bv5kavo6.internal:443:93.77.163.176 \
+  "https://certissue-bv5kavo6.internal/internal/cert?uuid=<UUID>&action=approve"
+```
+**Подтверждено.** `{"ok":true,"status":"issued","uuid":"<UUID>"}` — **ноль аутентификации, ноль клиентского
+сертификата.** `action` — строгий enum `approve|decline`; `uuid` должен ссылаться на существующую заявку
+(случайные → `not found`); любые `cn`/`email` молча игнорятся. Переименовать сертификат это не даёт — но даёт
+**мгновенно самому себе одобрять любую свою заявку**, схлопывая «ждём живого модератора» до секунд. Именно эта
+скорость нужна нитке F.
 
-### Thread F — the deterministic-keygen rabbit hole, then the real Bug 2
+> Бытовая аналогия: «внутренний только» сервис, стоящий на общем пограничном IP, — это как «служебная дверь без
+> таблички». Таблички нет, но дверь физически рядом и не заперта: назвал правильное имя — вошёл. Сегментация
+> «по незаметности» — не сегментация.
 
-- **Observation.** Calling `/api/enroll` twice in the same session returned a **byte-identical**
-  `private_key_pem` both times.
-- **Hypothesis (the expensive one).** Read literally, "same input → same private key" smells like a
-  vibecoded RSA keygen seeded deterministically from the CN — i.e. the keypair is
-  `f(CN)` for some guessable `f`. If true, `admin`'s private key is just `f("admin")`, no CA
-  compromise needed at all. This looked *extremely* promising: the server handing back
-  `private_key_pem` at all is already an unusual design choice, consistent with a hand-rolled,
-  possibly-seeded keygen.
-- **Test.** A dedicated crack pass threw **~230,000 candidate derivations** at the real leaf's known
-  `(p, q)`: paired sequential PRNG draws (`random.Random(seed)`, hashlib-CTR, `getPrime` /
-  `sympy.nextprime` in various framings) across 46 seed-material variants; a decoupled
-  single-target search (any formula landing on *either* p or q) across 134 seed materials ×
-  multiple expansion methods (18,441 candidates); UUID-focused sweeps exploiting the UUID's cheaper
-  128-bit-equality oracle (76,325 + 105 candidates, including HKDF/AES-CTR-DRBG/ChaCha20
-  constructions); and — the decisive diagnostic — a **near-miss ranking** of ~10,000 candidates by
-  shared-prefix bit-length against the real primes, to catch a formula that's "correct in spirit"
-  but slightly off.
-- **Result — refuted, and here's why it looked true.** Zero exact matches, and the near-miss ranking
-  found **no signal above pure-chance noise** (best hit: 13 shared bits, exactly
-  `log2(10000)` — the expected value for random guessing). A statistical check of the real `(p, q)`
-  (bit-balance, longest run, byte-repeat distribution) was consistent with genuine `os.urandom`.
-  Cross-checking against other recon passes revealed the simpler explanation: **`/api/enroll` is
-  idempotent** — it persists one record per account and returns that same stored record (including
-  its already-generated key) on every repeat call. "Two enrolls, same key" was never evidence of a
-  seed formula; it was just an ordinary idempotent API returning the same DB row twice.
-- **Pivot to the real Bug 2.** If repeat-enroll is merely idempotent, the lever isn't *deriving* a
-  key — it's making the server generate a **genuinely new** record. Declining the pending/issued
-  enrollment and re-enrolling does exactly that: a fresh UUID, a fresh keypair, and (confirmed on
-  the real account) the certificate **serial is a global incrementing counter**, so the new leaf
-  gets a new serial and is signed over new TBS bytes:
-  ```
-  leaf.crt   subject=CN=shadowklesh@gmail.com  issuer=CN=BeeCA, O=BeeCA  serial=0x1000
-  leaf2.crt  subject=CN=shadowklesh@gmail.com  issuer=CN=BeeCA, O=BeeCA  serial=0x1001
-  ```
-  Same CN, **different serial → different TBS → different signature**. Two signatures over two
-  *known* messages from a single account is precisely the input the crypto step needs — and
-  combined with Thread E's unauthenticated self-approve, collecting the pair takes seconds instead
-  of two human-review cycles.
+### Нитка F — кроличья нора «детерминированного ключа», а за ней настоящий Баг 2
 
-### Thread G — Bug 3: recovering N, and the "aha" about `e=65537`
+**Наблюдение.** Два вызова `/api/enroll` в одной сессии вернули **байт-в-байт одинаковый** `private_key_pem`.
+**Дорогая гипотеза.** «Одинаковый вход → одинаковый ключ» пахнет вайбкод-генератором RSA, засеянным от CN: мол,
+ключ = `f(CN)`. Если так — приватный ключ `admin` = `f("admin")`, и никакой взлом CA не нужен. Выглядело
+*очень* соблазнительно (сервер вообще отдаёт `private_key_pem` — необычно, в духе самопального генератора).
+**Проверка.** Отдельный прогон бросил **~230 000 кандидатов-выводов** на известные `(p, q)` реального листа:
+парные PRNG-выборки, hashlib-CTR, `getPrime`/`nextprime` в разных обёртках (46 вариантов сид-материала);
+раздельный поиск любой формулы, попадающей хоть в `p`, хоть в `q` (18 441 кандидат); UUID-ориентированные
+проходы (76 325 + 105, с HKDF/AES-CTR-DRBG/ChaCha20); и решающий диагностический — **ранжирование «почти
+попаданий»** ~10 000 кандидатов по длине совпадающего префикса с настоящими простыми.
+**Итог — опровергнуто, и понятно почему казалось правдой.** Ноль точных совпадений; лучший «почти» — 13
+совпавших бит, ровно `log2(10000)`, то есть **чистый шум**. Статистика реальных `(p, q)` неотличима от
+`os.urandom`. Правильное простое объяснение: **`/api/enroll` идемпотентен** — хранит одну запись на аккаунт и
+на повтор отдаёт её же (вместе с уже сгенерированным ключом). «Два enroll — один ключ» было не формулой, а
+просто повторной выдачей той же строки БД.
+**Поворот к настоящему Багу 2.** Раз повтор enroll — просто идемпотентность, рычаг не в «выводе» ключа, а в том,
+чтобы заставить сервер сгенерировать **по-настоящему новую** запись. Отклоняем pending-заявку и enroll'имся
+заново — получаем свежий UUID, свежий ключ, и (подтверждено на реальном аккаунте) **serial — глобальный
+счётчик-инкремент**, поэтому новый лист получает новый номер и подпись над новыми байтами:
+```
+leaf.crt   subject=CN=shadowklesh@gmail.com  issuer=CN=BeeCA, O=BeeCA  serial=0x1000
+leaf2.crt  subject=CN=shadowklesh@gmail.com  issuer=CN=BeeCA, O=BeeCA  serial=0x1001
+```
+Тот же CN, **другой serial → другие подписываемые байты → другая подпись**. Две подписи над двумя *известными*
+сообщениями с одной учётки — ровно то, что нужно крипто-шагу. А с мгновенным само-одобрением из нитки E пара
+собирается за секунды.
 
-- **Observation.** We now hold two BeeCA-signed leaves with known TBS bytes and known signatures.
-  An RSA signature is `s = EM^d mod N`, where `EM = EMSA-PKCS1v1.5(SHA256(TBS))` is something we can
-  recompute byte-for-byte ourselves.
-- **The blocking assumption we started from.** The standard intuition is *"`e=65537` makes
-  signature-based `N`-recovery infeasible"* — with a small `e` (e.g. `e=3`) there are classic
-  low-exponent attacks, but `e=65537` is supposed to close that door. Under that assumption, this
-  thread looked dead before it started.
-- **Why that assumption is false here.** `s^e ≡ EM (mod N)` always implies `s^e − EM = k·N` for some
-  integer `k`, **regardless of the size of `e`** — the only cost is computing `s^e`, which is "just"
-  a ~16 MB integer. A modern bignum library (`gmpy2`) computes it in well under a second. With two
-  leaves, `N = gcd(s1^e − EM1, s2^e − EM2)` (up to a tiny cofactor stripped afterward).
-- **Test.** `recover_ca_and_forge.py` implements exactly this against `leaf.crt`/`leaf2.crt`.
-  ```bash
-  python3 recover_ca_and_forge.py leaf.crt leaf2.crt
-  # [+] recovered CA modulus N: 2048 bits (emlen guess 256)
-  ```
-- **Confirmed.** `s^e mod N == EM` holds for **both** leaves — the recovered 2048-bit `N` is
-  genuine, not a coincidental small cofactor. The flag's own text (*WeaK_CrYpto*) suggests the
-  author built this on the same "large `e` protects you" misconception.
+### Нитка G — Баг 3: восстанавливаем `N`, и «ага» про `e=65537`
 
-### Thread H — factoring the recovered CA key
+**Наблюдение.** У нас два листа, подписанных BeeCA, с известными подписываемыми байтами и подписями. Подпись RSA
+— это `s = EM^d mod N`, где `EM = EMSA-PKCS1v1.5(SHA256(TBS))` мы можем пересчитать сами, байт-в-байт.
 
-- **Observation.** A 2048-bit `N` recovered from a *hand-rolled* CA is a strong hint the primes
-  aren't independently random — "vibecoded" crypto tends to fail on prime generation, not on the
-  RSA math itself.
-- **Hypothesis → test → result, run as a battery, each step a real dead end before the next:**
-  - Small factors (2…47): none divide `N`.
-  - Plain **Fermat** (assumes `p ≈ q`, i.e. `p/q ≈ 1`): no square found in a reasonable search
-    window — the primes are not *that* close.
-  - **Batch-GCD** against the leaf moduli (shared-prime reuse between CA and leaf keys): `gcd(N,
-    leaf_modulus)` trivial for both leaves — no shared factor.
-  - **ROCA / factordb lookup**: negative (this had already been established earlier, in Thread C/D,
-    for the *leaf* keys — re-checked here for the CA modulus specifically, also negative).
-- **The step further.** Fermat is the special case `k=1` of **Lehman's method**, which searches for
-  primes related by a small ratio `p/q ≈ b/a` (not just `p ≈ q`) by scaling `N` by a multiplier `k`
-  before the square search. Sweeping small `k`, **`k=99` factors `N` instantly** — a classic
-  hand-rolled-key signature (a "quick `getPrime()`-twice" implementation whose two primes end up in
-  an unbalanced-but-related ratio, not independently random).
-- **Confirmed.** `p·q == N`; from there `d = e⁻¹ mod (p−1)(q−1)` reconstructs the full CA private
-  key, which correctly re-signs and validates against our own known leaves.
+> Мини-словарь RSA (совсем на пальцах). У бюро есть пара чисел: **публичное** (`N` — «модуль», большое число, и
+> `e` — маленький открытый показатель, обычно `65537`) и **секретное** (`d`). Подпись — это возведение
+> сообщения в степень `d` по модулю `N`. Проверка — возведение подписи в степень `e`: если получилось исходное
+> сообщение — подпись настоящая. Секрет `d` легко вычислить, если разложить `N` на два простых множителя `p·q`
+> — а вот разложить большое `N` обычно очень трудно. **GCD (НОД, наибольший общий делитель)** — школьная
+> операция «какое самое большое число делит оба».
 
-By this point every earlier "recon fact" from §2 had turned from a blocker into a load-bearing piece
-of the chain: no CN control (Thread A) → no self-sign (Thread B) → no direct CA download (Thread C)
-→ but an unauthenticated internal issuer (Thread E) plus a decline/re-enroll logic gap (Thread F)
-gave two signatures, and those two signatures alone were enough to break the CA (Threads G–H).
+**Блокирующее заблуждение, с которого мы стартовали.** Ходовая интуиция: *«`e=65537` делает восстановление `N`
+по подписям невозможным»* — при маленьком `e` (например `3`) есть классические атаки, а `65537` их «закрывает».
+Под этим допущением нитка выглядела мёртвой.
+**Почему допущение здесь ложно.** `s^e ≡ EM (mod N)` всегда означает `s^e − EM = k·N` для какого-то целого `k`
+— **независимо от размера `e`**. Единственная плата — посчитать `s^e`, это «всего лишь» число ~16 МБ; библиотека
+длинной арифметики (`gmpy2`) делает это за доли секунды. По двум листам: `N = gcd(s1^e − EM1, s2^e − EM2)` (с
+точностью до крохотного множителя, который потом снимаем).
+**Тест.** `recover_ca_and_forge.py` делает ровно это над `leaf.crt`/`leaf2.crt`.
+```bash
+uv run python beeca/recover_ca_and_forge.py beeca/leaf.crt beeca/leaf2.crt
+# [+] recovered CA modulus N: 2048 bits (emlen guess 256)
+```
+**Подтверждено.** `s^e mod N == EM` выполняется для **обоих** листов — восстановленный 2048-битный `N`
+настоящий. Само название флага (*WeaK_CrYpto*) намекает, что автор построил задачу на этом же заблуждении
+«большой `e` защищает».
 
-## 4. The vulnerability
+### Нитка H — раскладываем восстановленный ключ CA на множители
 
-Three independent bugs chain together; none alone gives `CN=admin`:
+**Наблюдение.** 2048-битный `N` от *самодельного* CA — сильный намёк, что простые не независимо случайны:
+«вайбкод-крипта» ломается на генерации простых, а не на самой RSA-математике.
+**Гипотеза → тест → итог, батареей, каждый шаг — честный тупик перед следующим:**
+- Малые множители (2…47): ни один не делит `N`.
+- Чистый **Ферма** (предполагает `p ≈ q`): в разумном окне квадрата нет — простые не *настолько* близки.
+- **Batch-GCD** против модулей листов (вдруг CA и листы делят простое): `gcd` тривиален — общего множителя нет.
+- **ROCA / factordb**: пусто.
+**Шаг дальше.** Ферма — частный случай `k=1` **метода Лемана**, который ищет простые, связанные малым
+отношением `p/q ≈ b/a` (а не просто `p ≈ q`), домножая `N` на `k` перед поиском квадрата. Перебираем малые `k` —
+**`k=99` раскладывает `N` мгновенно**: классическая подпись самопального ключа («быстро дёрнули `getPrime()`
+дважды», и два простых оказались в несбалансированном, но связанном отношении).
+**Подтверждено.** `p·q == N`; отсюда `d = e⁻¹ mod (p−1)(q−1)` восстанавливает полный приватный ключ CA — он
+корректно переподписывает и проходит проверку на наших листах.
 
-1. **Web/Logic — unauthenticated internal issuer.** `POST /internal/cert?uuid=&action=approve` on
-   `certissue-bv5kavo6.internal` performs no authentication and no authorization check; its only
-   protection is that the hostname is absent from public DNS. It is colocated on the same edge IP as
-   the public vhosts, so any client that sets **both** TLS SNI and HTTP `Host` to that name reaches
-   it directly and can self-approve (or decline) *any* existing enrollment UUID.
-2. **Logic — re-enrollment is not rate-/count-limited per account.** Declining an enrollment and
-   calling `/api/enroll` again generates a genuinely new record: new random RSA keypair, new random
-   UUID, and a new certificate **serial** drawn from a global incrementing counter. Nothing ties the
-   number of *distinct signed leaves* a single verified identity can obtain to one — so one Google
-   account can produce an arbitrary number of independently-signed messages under attacker control
-   (their own, fixed `CN`, but attacker-chosen serial/timing).
-3. **Crypto — the CA's RSA key is both recoverable and weak.** (a) Because the padded message
-   `EM = EMSA-PKCS1v1.5(SHA256(TBS))` for any leaf is fully computable from public data, two signed
-   messages leak the CA modulus via `N = gcd(s1^e − EM1, s2^e − EM2)` — this holds at any public
-   exponent, including `e=65537`, because `s^e` is cheap for a bignum library. (b) The CA's own key
-   generation produces primes related by a small ratio (`p/q ≈ b/a`) rather than independently
-   random 1024-bit primes, so Lehman's method factors the recovered `N` almost instantly once found.
+К этому моменту каждый ранний «факт разведки» из §2 превратился из преграды в несущую деталь: нет контроля CN
+(A) → нет само-подписи (B) → нет прямого скачивания CA (C) → но есть неаутентифицированный внутренний
+выдаватель (E) плюс дырка «отклони и переоформи» (F) дали две подписи, а двух подписей хватило, чтобы сломать
+CA (G–H).
 
-Bug 1 supplies *fast* issuance, Bug 2 supplies a *second signature*, and Bug 3 turns two signatures
-into the CA's private key — which is then used to sign a certificate for whatever `CN` we choose.
+## 4. В чём именно ошибка (суть уязвимости)
 
-## 5. Exploit — step by step
+Три независимых бага сцепляются в цепочку; ни один сам по себе не даёт `CN=admin`:
 
-1. Log in with Google, then enroll to get a real, per-account leaf (`CN` = your verified email):
+1. **Web/Logic — неаутентифицированный внутренний выдаватель.** `POST /internal/cert?uuid=&action=approve` на
+   `certissue-bv5kavo6.internal` не делает ни аутентификации, ни авторизации; вся его «защита» — отсутствие
+   имени в публичном DNS. Он на том же пограничном IP, что и публичные сайты, поэтому любой, кто выставит **и**
+   TLS-SNI, **и** HTTP-`Host` в это имя, попадает на него и само-одобряет (или отклоняет) любую заявку по UUID.
+2. **Logic — переоформление не ограничено по числу на аккаунт.** Отклонив заявку и вызвав `/api/enroll` снова,
+   получаешь по-настоящему новую запись: новый ключ, новый UUID, новый **serial** из глобального счётчика.
+   Ничто не привязывает число *разных подписанных листов* с одной личности к единице — одна учётка порождает
+   сколько угодно независимо подписанных сообщений.
+3. **Crypto — ключ CA и восстановим, и слаб.** (а) Так как `EM = EMSA-PKCS1v1.5(SHA256(TBS))` для любого листа
+   полностью вычисляем из публичных данных, две подписи выдают модуль CA через `N = gcd(s1^e − EM1, s2^e − EM2)`
+   — это работает при любом открытом `e`, включая `65537`, потому что `s^e` дёшев для библиотеки длинной
+   арифметики. (б) Генерация ключа CA даёт простые в малом отношении (`p/q ≈ b/a`), а не независимо случайные,
+   поэтому метод Лемана раскладывает `N` почти мгновенно.
+
+Баг 1 даёт *быструю* выдачу, Баг 2 — *вторую* подпись, Баг 3 превращает две подписи в приватный ключ CA — им и
+подписываем сертификат с любым `CN`.
+
+## 5. Эксплойт по шагам
+
+1. Входим через Google, оформляем реальный лист (`CN` = наша почта):
    ```bash
    POST /api/enroll   # -> {"uuid": "<UUID1>", "cn": "you@example.com", "status": "pending", ...}
    ```
-2. **Bug 1** — self-approve instantly via the unauthenticated internal issuer (no waiting for a
-   human reviewer):
+2. **Баг 1** — мгновенно само-одобряем через неаутентифицированный внутренний выдаватель:
    ```bash
    curl -sk -X POST --resolve certissue-bv5kavo6.internal:443:93.77.163.176 \
      "https://certissue-bv5kavo6.internal/internal/cert?uuid=<UUID1>&action=approve"
@@ -313,86 +292,80 @@ into the CA's private key — which is then used to sign a certificate for whate
    openssl pkcs12 -in beeca-client.p12 -passin pass:beeca -nodes -clcerts \
      | openssl x509 -out leaf.crt
    ```
-3. **Bug 2** — decline that enrollment and re-enroll to mint a genuinely new record (new keypair,
-   new serial → new signature), then self-approve it the same way:
+3. **Баг 2** — отклоняем эту заявку и переоформляем (новый ключ, новый serial → новая подпись), снова
+   само-одобряем:
    ```bash
    curl -sk -X POST --resolve certissue-bv5kavo6.internal:443:93.77.163.176 \
      "https://certissue-bv5kavo6.internal/internal/cert?uuid=<UUID1>&action=decline"
-   POST /api/enroll   # -> {"uuid": "<UUID2>", "cn": "you@example.com", "status": "pending", ...}
+   POST /api/enroll   # -> {"uuid": "<UUID2>", ..., "status": "pending", ...}
    curl -sk -X POST --resolve certissue-bv5kavo6.internal:443:93.77.163.176 \
      "https://certissue-bv5kavo6.internal/internal/cert?uuid=<UUID2>&action=approve"
    curl -H "Cookie: beeca_session=<SESS>" https://portal-bv5kavo6.beeca.avitoctf.ru/api/cert \
      -o leaf2.p12
    openssl pkcs12 -in leaf2.p12 -passin pass:beeca -nodes -clcerts | openssl x509 -out leaf2.crt
    ```
-   Now `leaf.crt` (serial `0x1000`) and `leaf2.crt` (serial `0x1001`) are two distinct, genuinely
-   BeeCA-signed certificates from one account.
-4. **Bug 3a** — recover the CA modulus algebraically from the two signatures:
+   Теперь `leaf.crt` (serial `0x1000`) и `leaf2.crt` (serial `0x1001`) — два разных, по-настоящему подписанных
+   BeeCA сертификата с одной учётки.
+4. **Баг 3a** — алгебраически восстанавливаем модуль CA из двух подписей:
    ```bash
-   python3 recover_ca_and_forge.py leaf.crt leaf2.crt
+   uv run python beeca/recover_ca_and_forge.py beeca/leaf.crt beeca/leaf2.crt
    # [+] recovered CA modulus N: 2048 bits (emlen guess 256)
    ```
-5. **Bug 3b** — the tool's factoring battery runs small-factors → Fermat → batch-GCD → Lehman
-   (`k=99` wins), reconstructs `d = e⁻¹ mod (p−1)(q−1)`, and builds the CA private key from
-   `(N, p, q, d)`.
-6. Forge a `CN=admin` leaf signed by the recovered CA key (same script): issuer
-   `CN=BeeCA, O=BeeCA`, `BasicConstraints: CA=FALSE`, `KeyUsage: digitalSignature`,
-   `EKU: clientAuth`, serial `0x2000` — written to `admin.crt`/`admin.key`.
-7. Present it over mTLS to the admin host:
+5. **Баг 3b** — батарея факторизации в скрипте: малые множители → Ферма → batch-GCD → Леман (`k=99` побеждает),
+   восстанавливает `d = e⁻¹ mod (p−1)(q−1)` и собирает приватный ключ CA из `(N, p, q, d)`.
+6. Куём лист `CN=admin`, подписанный восстановленным ключом CA (тем же скриптом): issuer `CN=BeeCA, O=BeeCA`,
+   `BasicConstraints: CA=FALSE`, `KeyUsage: digitalSignature`, `EKU: clientAuth`, serial `0x2000` — пишутся в
+   `admin_forged.crt`/`admin_forged.key`.
+7. Предъявляем по mTLS админ-хосту:
    ```bash
-   curl --cert admin.crt --key admin.key https://admin-bv5kavo6.beeca.avitoctf.ru/
+   curl --cert admin_forged.crt --key admin_forged.key https://admin-bv5kavo6.beeca.avitoctf.ru/
    ```
-   The chain validates (it's genuinely CA-signed) and the app's exact `CN == "admin"` check passes.
-   The admin host returns the **Первопромпт** — a satirical "vibecoder bee" manifesto
-   (`firstprompt.txt`) that ends with:
+   Цепочка проходит (сертификат по-настоящему подписан CA), точная сверка `CN == "admin"` проходит. Хост отдаёт
+   **Первопромпт** — сатирический манифест «пчелы-вайбкодера» (`firstprompt.txt`), оканчивающийся строкой:
    ```
    - Дают - бери. Не дают - отбери avito{uZUzUlEy_WeaK_CrYp7O_vIBeee}
    ```
 
-All of steps 4–6 are reproduced end-to-end by `recover_ca_and_forge.py` (see §8) — it takes the two
-leaf certs as its only input and writes the forged `admin.crt`/`admin.key` pair.
+Шаги 4–6 целиком воспроизводит `recover_ca_and_forge.py` (см. §8): на вход — два листа, на выход — форжёные
+`admin.crt`/`admin.key`.
 
-## 6. Flag
+## 6. Флаг
 
 ```
 avito{uZUzUlEy_WeaK_CrYp7O_vIBeee}
 ```
 
-## 7. Takeaways
+## 7. Мораль — какой это урок
 
-1. **Network-position "security" is not security.** An internal issuer separated only by an
-   unresolvable hostname is one matching `SNI`/`Host` away on a shared edge IP.
-2. **Signature-based CA-modulus recovery is practical even at `e=65537`.** `s^e − EM = k·N`, then
-   GCD over two certs. A large public exponent does not by itself protect the modulus once two
-   known-message signatures exist — `s^e` is cheap for a bignum library.
-3. **Hand-rolled CA keys are weak — run the *whole* factoring battery.** ROCA / Fermat / batch-GCD /
-   **Lehman**, not just Fermat. Here only Lehman (`k=99`) cracked it; a "close primes" check alone
-   would have missed it.
-4. **Idempotent APIs and "deterministic-looking" behavior are not the same thing.** The single
-   biggest time sink in this challenge (~230K candidate key derivations) came from mistaking an
-   ordinary idempotent `POST /api/enroll` for a seeded keygen formula. Before chasing a
-   crypto-derivation hypothesis, rule out the boring explanation (the server is just returning a
-   stored record) — a decline/re-enroll test would have settled it in one request.
-5. **A tiny logic flaw feeds the crypto.** Unlimited re-enrollment + a global incrementing serial
-   produced two distinct leaves from one account — exactly the two signatures the whole attack is
-   built on. The three category tags (Web + Logic + Crypto) are literally the three links of the
-   chain.
+- **«Защита по сетевому положению» — не защита.** Внутренний выдаватель, отделённый лишь нерезолвящимся именем, —
+  это одно совпадение `SNI`/`Host` на общем пограничном IP. Что делать: «внутренние» сервисы должны быть
+  по-настоящему изолированы (отдельная сеть/mTLS/аутентификация), а не спрятаны «по незаметности».
+- **Восстановление модуля CA по подписям реально даже при `e=65537`.** `s^e − EM = k·N`, дальше GCD по двум
+  сертификатам. Большой открытый показатель сам по себе не защищает модуль, как только есть две подписи над
+  известными сообщениями — `s^e` дёшев для длинной арифметики. Заблуждение «большой `e` спасает» — ровно то, на
+  чём построена задача.
+- **Самодельные ключи CA слабы — гоняй *всю* батарею факторизации.** ROCA / Ферма / batch-GCD / **Леман**, а не
+  только Ферма. Здесь взял лишь Леман (`k=99`); проверка «близкие простые» одна бы промахнулась.
+- **Идемпотентность ≠ «детерминированное поведение».** Крупнейшая потеря времени (~230K кандидатов ключа) — из-за
+  того, что обычный идемпотентный `POST /api/enroll` приняли за засеянный генератор. Прежде чем гнаться за
+  крипто-гипотезой, исключи скучное объяснение (сервер просто отдаёт сохранённую запись) — один тест
+  «отклони/переоформи» решил бы это в один запрос.
+- **Мелкая логическая дырка кормит крипто.** Безлимитное переоформление + глобальный serial-счётчик дали две
+  подписи с одной учётки — ровно те две подписи, на которых держится вся атака. Три ярлыка (Web + Logic + Crypto)
+  — буквально три звена цепочки.
 
-## 8. Artifacts
+## 8. Файлы в папке
 
-- `recover_ca_and_forge.py` — curated end-to-end script: recovers the CA modulus `N` from ≥2 leaf
-  certs (`N = gcd(s1^e − EM1, s2^e − EM2)`), factors it (small factors → Fermat → batch-GCD →
-  Lehman), rebuilds the CA private key, and forges/signs a `CN=admin` certificate. Verified against
-  the real `leaf.crt`/`leaf2.crt` in this folder — the recovered CA key correctly verifies the
-  actual `admin.crt` that was used to fetch the flag. `ruff format` / `ruff check` clean; `ty check`
-  clean (its two non-stdlib imports, `cryptography` and `gmpy2`, carry targeted
-  `ty: ignore[unresolved-import]` comments, documented in the module docstring — neither package is
-  a project dependency and neither ships inline type stubs).
-- `RECON.md`, `WEBLOGIC_NOTES.md`, `CRYPTO_NOTES.md`, `APPROVAL_CRYPTO_NOTES.md`,
-  `DETERMINISTIC_NOTES.md`, `DETKEY_CRACK_NOTES.md`, `FRESHEYES_NOTES.md`, `NOLOGIN_NOTES.md`,
-  `BUNDLE_ANALYSIS.md` — the full reasoning trail (recon passes, the refuted deterministic-keygen
-  crack attempt with its 230K-candidate search, the confirmed internal-issuer bug, the crypto
-  recovery/factoring notes).
-- `leaf.crt`/`leaf2.crt` (the two signing inputs), `admin.crt`/`admin.key` (the forged cert),
-  `firstprompt.txt` (the recovered First Prompt), `artifacts/` (raw `s_client`/`p12` dumps),
-  `FLAG.txt`.
+- `recover_ca_and_forge.py` — выверенный сквозной скрипт: восстанавливает модуль CA `N` из ≥2 листов
+  (`N = gcd(s1^e − EM1, s2^e − EM2)`), раскладывает его (малые множители → Ферма → batch-GCD → Леман),
+  собирает приватный ключ CA и куёт/подписывает сертификат `CN=admin`. Проверен против реальных
+  `leaf.crt`/`leaf2.crt` в этой папке; восстановленный ключ CA корректно проверяет тот самый `admin.crt`,
+  которым забрали флаг. `ruff format`/`ruff check` чисто; `ty check` чисто (два не-stdlib импорта,
+  `cryptography` и `gmpy2`, помечены точечными `ty: ignore[unresolved-import]`).
+- `leaf.crt`/`leaf2.crt` — два подписывающих входа (serial `0x1000`/`0x1001`).
+- `admin.crt`/`admin.key` — форжёный сертификат `CN=admin` и ключ к нему.
+- `firstprompt.txt` — восстановленный «Первопромпт» (оканчивается флагом).
+- `portal.js` — минифицированный фронтенд-бандл портала (из него собрана карта API).
+- `beeca-client.p12`, `leaf2.p12`, `current.p12` — сырые `p12`-дампы (клиентские сертификаты и
+  промежуточные).
+- `FLAG.txt` — сохранённый флаг.

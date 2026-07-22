@@ -24,7 +24,7 @@ Approach (mirrors write-up §3-§5):
     to get the flag rendered by the server.
 
 Usage:
-    python3 solve_sotek.py --base-url https://sotek-<id>.avitoctf.ru
+    uv run python sotek/solve_sotek.py --base-url https://sotek-<id>.avitoctf.ru
 """
 
 from __future__ import annotations

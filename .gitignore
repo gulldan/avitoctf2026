@@ -2,8 +2,8 @@
 # Curated CTF write-ups repo.
 # Strategy: ignore EVERYTHING, then re-include exactly what we keep —
 # write-ups (.md), task briefs, curated scripts, and repo config.
-# Agent scratch, binaries, archives, extracted trees, venvs, captures,
-# one-time secrets stay OUT of git (files remain on disk, just not committed).
+# Agent scratch, binaries, extracted trees, venvs, captures, one-time secrets,
+# and archives (except one exact 20 KiB Goliath fixture) stay OUT of git.
 # ==========================================================================
 *
 
@@ -13,6 +13,7 @@
 !README.md
 !MEMES.md
 !WRITEUP_TEMPLATE.md
+!WRITEUP_STYLE_FOR_TEACHING.md
 !pyproject.toml
 !uv.lock
 
@@ -24,6 +25,10 @@
 !task*/
 !task*/*_writeup.md
 !task*/task.md
+!returns/
+!returns/*_writeup.md
+!returns/task.md
+!returns/FLAG.txt
 
 # --- curated deliverable scripts (must pass ruff + ty) ---
 !task10/solve.py
@@ -38,6 +43,8 @@
 !notrespassing/solve_notrespassing.py
 !david/solve_david.py
 !goliath/solve_goliath.py
+!goliath/robust_walk.py
+!goliath/goliath_c8c718c.zip
 !polba/solve_polba.py
 !napasekev2/solve_napasekev2.py
 !task2/decode_ghost.py
@@ -45,22 +52,74 @@
 !task4/solve_task4.py
 !task5/solve_task5.py
 !task6/solve_task6.py
+!task6/marketplugins/
+!task6/marketplugins/PluginScanner.java
+!task6/marketplugins/SandboxPolicy.java
+!task6/exploit/
+task6/exploit/*
+!task6/exploit/build.sh
+!task6/exploit/src/
+!task6/exploit/src/example/
+!task6/exploit/src/example/SeasonalDiscountPlugin.java
+!task6/exploit/harness/
+!task6/exploit/harness/Verify.java
+!task6/exploit/harness/example/
+!task6/exploit/harness/example/BlockedPlugin.java
+!task6/exploit/harness/org/
+!task6/exploit/harness/org/springframework/
+!task6/exploit/harness/org/springframework/stereotype/
+!task6/exploit/harness/org/springframework/stereotype/Component.java
+!task6/exploit/harness/ru/
+!task6/exploit/harness/ru/avitoctf/
+!task6/exploit/harness/ru/avitoctf/marketplugins/
+!task6/exploit/harness/ru/avitoctf/marketplugins/api/
+!task6/exploit/harness/ru/avitoctf/marketplugins/api/DiscountPlugin.java
+!task6/exploit/harness/ru/avitoctf/marketplugins/api/PluginContext.java
+!task6/exploit/harness/ru/avitoctf/marketplugins/model/
+!task6/exploit/harness/ru/avitoctf/marketplugins/model/PluginResult.java
+!task6/exploit/harness/ru/avitoctf/marketplugins/sandbox/
+!task6/exploit/harness/ru/avitoctf/marketplugins/sandbox/SandboxException.java
+!task6/exploit/harness/ru/avitoctf/marketplugins/sandbox/ValidatedJar.java
 !task7/exploit_server.py
 !task8/solve_task8.py
 !task11/drv.py
 !task11/cdp.py
+!task11/intercom_boot.html
 !task12/session_server.py
+!task12/solve_task12.py
+!task12/m.sh
+!task12/orch.sh
 !task13/rce_exec.py
+!task13/pwn_brainwash.py
 !task13/pod_all.py
 !task13/pod_exec.py
+!task14/solve_task14.py
+!task15/solve_task15.py
 !task16/exploit.py
 !task17/bee.py
+!task17/solve_task17.py
+!task17/parse_pcap.py
+!task17/carve.py
+!task17/sha256ext.py
+!task17/solve_oracle.py
+!task17/beesix/
+task17/beesix/*
+!task17/beesix/traffic.pcap
 !task18/s3list.py
+!task18/solve_task18.py
 !task19/s3get.py
+!task19/solve_task19.py
+!task21/exploit2.py
+!task21/s3.py
+!task21/s3put.py
+!task21/solve_task21.py
+!task21/pairs_sorted.txt
+!task9/solve_nagibator.py
+!returns/solve_returns_redis.py
 !task20/agents/
 !task20/agents/username_flip_reopen/
 !task20/agents/username_flip_reopen/offset_sweep.py
-!task21/exploit2.py
+!task20/agents/username_flip_reopen/fetch_flag.py
 
 # --- named-task curated scripts (their dirs already re-included above) ---
 !beeca/recover_ca_and_forge.py
@@ -69,64 +128,74 @@
 !sotek/solve_sotek.py
 !medofans/solve_medofans.py
 !sotolambda/mkelf.py
+!sotolambda/solve_sotolambda.py
 !honeyvault/exploit.py
 !botnet/solve_botnet.py
 !slophacking/exploit/
 !slophacking/exploit/inject_server.py
+!slophacking/exploit/redeploy.sh
 
 # --- named (non-numbered) solved task folders: keep write-ups, notes, flags ---
 !beeca/
-!beeca/*.md
+!beeca/*_writeup.md
 !beeca/FLAG.txt
 !botnet/
-!botnet/*.md
+!botnet/*_writeup.md
 !botnet/FLAG.txt
 !ebee/
-!ebee/*.md
+!ebee/*_writeup.md
 !ebee/FLAG.txt
 !filter/
-!filter/*.md
+!filter/*_writeup.md
 !filter/FLAG.txt
 !filter2/
-!filter2/*.md
+!filter2/*_writeup.md
 !filter2/FLAG.txt
 !napaseke/
-!napaseke/*.md
+!napaseke/*_writeup.md
 !napaseke/FLAG.txt
 !notrespassing/
-!notrespassing/*.md
+!notrespassing/*_writeup.md
 !notrespassing/FLAG.txt
 !notrespassing/src/
 !david/
-!david/*.md
+!david/*_writeup.md
 !david/FLAG.txt
 !goliath/
-!goliath/*.md
+!goliath/*_writeup.md
 !goliath/FLAG.txt
 !polba/
-!polba/*.md
+!polba/*_writeup.md
 !polba/FLAG.txt
 !napasekev2/
-!napasekev2/*.md
+!napasekev2/*_writeup.md
+!napasekev2/FLAG.txt
+!napasekev2/solve/
+!napasekev2/solve/solve_seqstall.py
+!napasekev2/solve/solve_napasekev2_stall.py
+!napasekev2/solve/forge_grind_R.py
+!napasekev2/solve/xmss_md5.py
+!napasekev2/solve/selftest.py
 !honeyleak/
-!honeyleak/*.md
+!honeyleak/*_writeup.md
 !honeyleak/FLAG.txt
 !honeyvault/
-!honeyvault/*.md
+!honeyvault/*_writeup.md
 !honeyvault/FLAG.txt
 !slophacking/
-!slophacking/*.md
+!slophacking/*_writeup.md
 !slophacking/FLAG.txt
 !sotek/
-!sotek/*.md
+!sotek/*_writeup.md
 !sotek/FLAG.txt
 !sotolambda/
-!sotolambda/*.md
+!sotolambda/*_writeup.md
 !sotolambda/FLAG.txt
 !sotolet/
-!sotolet/*.md
+!sotolet/*_writeup.md
 !sotolet/FLAG.txt
 !medofans/
-!medofans/*.md
+!medofans/*_writeup.md
+!medofans/FLAG.txt
 !medofans/*.json
 !medofans/app.js

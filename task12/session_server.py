@@ -22,7 +22,7 @@ import os
 import sys
 import time
 
-import paramiko  # ty: ignore[unresolved-import]
+import paramiko
 
 HOST = "undercover-zhvo8wkj.avitoctf.ru"
 USER = "worker"

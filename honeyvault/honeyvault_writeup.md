@@ -1,241 +1,306 @@
-# HoneyVault — write-up
+# HoneyVault — разбор
 
-**Flag:** `avito{Un1X_SOCK3T_Race_4nD_5TICkY_SymLinK_3XP3rT}`
-**Class:** Infra / Linux — network pivot → Docker-DNS host discovery → anonymous-SMB credential
-leak → Unix-socket `SO_PEERCRED` TOCTOU race → `tar -h` symlink privesc · **Difficulty / Points /
-Solves:** not stated in the task brief.
-**Author:** not stated (Avito CTF 2026 orgteam).
-**Access:** `ssh badger@honeyvault-<id>.avitoctf.ru`, password given per-instance (see `ACCESS.txt`).
+**Флаг:** `avito{Un1X_SOCK3T_Race_4nD_5TICkY_SymLinK_3XP3rT}`
+**Класс:** Infra / Linux — прыжок по сети → поиск хоста через Docker-DNS → утечка пароля из анонимного
+SMB → гонка на Unix-сокете (`SO_PEERCRED` TOCTOU) → повышение прав через `tar -h` по симлинку ·
+**Сложность / Очки / Решило команд:** в условии не указаны.
+**Автор:** не указан (оргкоманда Avito CTF 2026).
+**Доступ:** `ssh badger@honeyvault-<id>.avitoctf.ru`, пароль выдаётся на инстанс (см. `ACCESS.txt`).
 
-**One-paragraph story of the solve.** The public login drops you into an ephemeral container with
-`sudo NOPASSWD:ALL` and no flag anywhere on disk — a decoy. The real target, `hv-storage-01`, is a
-*sibling* container on the same per-connection `/26` that doesn't answer ping and is only reachable
-by name via Docker's embedded DNS. It exposes anonymous, writable SMB whose ops scripts leak a
-crackable password for a low-priv `operator` account, whose SSH session in turn exposes the
-world-readable source of a root-owned daemon (`AegisHive Processor` / `managectl`). That source has
-three independent bugs that have to be chained: a directory-whitelist typo that hands you a
-writable, whitelist-satisfying path; a `tar -chf -h` that dereferences symlinks as root; and an
-authorization check that keys off a *PID* re-read from `/proc` instead of the kernel-verified
-`SO_PEERCRED` credentials — which a connecting process can defeat by `execve()`-ing a SUID-root
-binary on itself mid-connection to flip its own euid to 0 before the daemon inspects it.
+## В двух словах (без терминов)
+
+Тебя пускают на сервер с логином `badger`, где ты и так «сам себе начальник» (можешь всё). Но это
+приманка: флага тут нет. Настоящая цель — **соседняя** машина, которая прячется в той же локальной
+сети и даже не отвечает на «пинг». Находим её по имени, залезаем в открытую сетевую папку, вытаскиваем
+оттуда пароль обычного сотрудника, входим под ним и читаем исходник программы-сторожа, которая работает
+от имени главного (root). В её коде — три ошибки, которые надо соединить в цепочку. Главная: сторож
+проверяет, «кто к нему постучался», не по надёжному удостоверению, а перечитывая документы **уже после**
+того, как дверь открыли, — и мы за эту долю секунды успеваем «переодеться в начальника». В итоге сторож
+от имени root упаковывает в архив файл, на который мы поставили «ярлык», ведущий к секретному
+`/root/flag.txt` — и отдаёт нам его содержимое.
 
 ---
 
-## 1. The challenge
+## 1. Что за задача
 
-You've breached a server of "HoneyVault," which runs the **AegisHive Processor** for scheduled
-backups / integrity checks / cleanup. Find the flaw in that admin system and read
-`/root/flag.txt`. The MOTD hints the interesting part is "internal network only" — i.e. not this
-first box.
+Ты «пробрался» на сервер компании «HoneyVault», где крутится демон **AegisHive Processor** (программа
+`managectl`) для плановых бэкапов, проверок целостности и очистки. Нужно найти ошибку в этой
+админ-системе и прочитать `/root/flag.txt`. Приветственная надпись при входе (MOTD) подсказывает, что
+самое интересное «только во внутренней сети» — то есть **не** на этой первой машине.
 
-## 2. Recon
+> Мини-словарь: **сервер** — удалённая машина, к которой подключаешься. **SSH** — защищённый способ
+> зайти в командную строку удалённой машины. **демон** — фоновая программа-служба, всегда запущенная и
+> ждущая команд. **root** — главный administrator в Linux, которому можно всё. **флаг** — секретная
+> строка `avito{...}`, ради которой всё и затевается.
 
-Established facts, in the order we pinned them down:
+## 2. Разведка — что мы увидели
 
-- The public sshd is `ForceCommand`-wrapped: `ssh host 'cmd'` / `scp` are refused ("Sorry, no
-  commands allowed"). Only a genuine interactive PTY session works, which means automation needs
-  `expect`, not one-liners.
-- **Every SSH connection spins up a brand-new ephemeral Docker container** on a random `/26`
-  (confirmed by diffing `ip -4 addr show eth0` across reconnects: `10.0.9.131/26`, `10.0.9.67/26`,
-  `10.0.9.195/26`, …). Container identity: hostname `hv-analyst-01`, Debian 12, `badger`
-  (uid 1000) with `sudo NOPASSWD:ALL` baked into `/etc/sudoers.d/`.
-- The `/26`'s gateway (`network+1`) answers SSH with the **same** `badger` credentials and drops
-  you into **another fresh `hv-analyst-01` container** — recursive, self-similar decoys.
-- Docker's embedded DNS resolver is configured (`/etc/resolv.conf: nameserver 127.0.0.11`).
-  Resolving service names against it (not scanning IPs) reveals a **sibling** container,
-  `hv-storage-01`, always at `network+2` — paired 1:1 with the current analyst container, so
-  **all further work has to happen inside one SSH session** (reconnect = new `/26` + new sibling).
-- `hv-storage-01` does **not** answer ICMP (so an `nmap -sn` sweep misses it) but has 22/139/445
-  open — a different SSH build (`OpenSSH 9.2p1 Debian`) than the analyst box, plus **Samba**. Its
-  banner literally reads `Storage node hv-storage-01 | AegisHive Processor enabled`.
-- Anonymous SMB (`smbclient -N`) exposes a `data` share, world-readable **and** world-writable,
-  containing the fictional company's ops tree (`admin/`, `backup/`, `database/`, `prod/`,
-  `security/`, `logs/`, `important/`) — the same names that later turn out to be the daemon's
-  directory whitelist.
+Факты в порядке, как мы их доставали:
 
-## 3. How we got there (hypothesis chain)
+- Публичный SSH обёрнут в `ForceCommand`: `ssh host 'команда'` и `scp` отвергаются («Sorry, no commands
+  allowed»). Работает только «живая» интерактивная сессия с терминалом. Значит автоматизировать всё
+  придётся не однострочниками, а через `expect` (программа, умеющая «печатать» в интерактивную сессию за
+  тебя).
+- **Каждое SSH-подключение поднимает новый одноразовый Docker-контейнер** в случайной подсети `/26`
+  (проверили, сравнив `ip -4 addr show eth0` между переподключениями: `10.0.9.131/26`, `10.0.9.67/26`,
+  `10.0.9.195/26`, …). Внутри: имя хоста `hv-analyst-01`, Debian 12, пользователь `badger` (uid 1000) и
+  `sudo NOPASSWD:ALL` — то есть можно стать root без пароля.
 
-**Observation 1 — `sudo NOPASSWD:ALL` looks like "the bug", but isn't.**
-`sudo -n cat /root/flag.txt` → *No such file*; a full `sudo -n find / -iname '*flag*'` and a
-recursive `grep -rIl "avito{"` both come back empty. Hypothesis: this box is bait, and the MOTD's
-"internal network only" line points at a second host we haven't found yet.
+  > Мини-словарь: **контейнер** — изолированная «коробка» с мини-Linux внутри. **Docker** — система,
+  > которая эти коробки создаёт. **подсеть `/26`** — небольшой кусок локальной сети на 64 адреса.
+  > **`sudo NOPASSWD:ALL`** — «выполняй что угодно от имени root без пароля».
 
-**Dead end — ICMP sweep "confirms" a maze of decoys.**
-`nmap -sn` on the `/26` only ever finds the gateway; pivoting into it just yields another identical
-analyst decoy, repeatedly, across three independent subnets. A parallel container-escape check
-(capabilities, `docker.sock`, cgroup `release_agent`, SUID binaries) comes back clean on every
-front. First pass concluded "no real host reachable this way" — **wrong**, because ICMP-based
-discovery silently misses any host that doesn't answer ping, and `hv-storage-01` is exactly that.
+- «Шлюз» подсети (адрес `сеть+1`) отвечает по SSH **теми же** кредами `badger` и роняет тебя в **ещё
+  один свежий** `hv-analyst-01` — рекурсивные самоподобные приманки.
+- Внутри контейнера настроен встроенный DNS-резолвер Docker (`/etc/resolv.conf: nameserver 127.0.0.11`).
+  Если спрашивать не «просканируй все адреса», а «резолвни имя сервиса», то всплывает **соседний**
+  контейнер `hv-storage-01`, всегда на адресе `сеть+2` — он спарен 1:1 с текущим `analyst`-контейнером.
+  Отсюда важное следствие: **всю работу надо делать в одной SSH-сессии**, потому что переподключение =
+  новая подсеть + новый сосед.
 
-**Correction — stop trusting `-sn`, probe ports directly across the whole subnet.**
-A `-Pn` (skip ping, just probe) full-subnet scan on port 445 (`nmap -Pn -sS -p445 --min-rate 3000
-<subnet>/26`) turns up a second live IP with Samba open that the ping sweep never saw. A cleaner,
-even more direct route confirmed the same host without scanning at all: Docker's own embedded
-resolver answers `getent hosts hv-storage-01` directly. Two independent methods, same host — high
-confidence it's real, not another decoy.
+  > Мини-словарь: **DNS-резолвер** — «телефонная книга»: превращает имя (`hv-storage-01`) в адрес.
+  > Docker держит свою внутреннюю книгу на адресе `127.0.0.11`.
 
-**Observation 2 — anonymous, writable SMB share full of "internal" ops docs.**
-Hypothesis: an ops script on the share leaks a credential (a recurring pattern in these tasks).
-Test: read every `.sh` under `admin/linux/` — `remote-backup.sh` hardcodes
-`REMOTE_PASS_HASH='$1$lp9yekC1$…'` for user `operator`, identical hash across fresh instances
-(baked into the image, crack once and it's good forever).
+- `hv-storage-01` **не отвечает на `ping`** (поэтому обычный «пинг-скан» его пропускает), но у него
+  открыты порты 22/139/445 — другая сборка SSH (`OpenSSH 9.2p1 Debian`), чем у `analyst`, плюс
+  файл-сервер **Samba**. Его баннер прямо гласит:
+  `Storage node hv-storage-01 | AegisHive Processor enabled`.
+- Анонимный SMB (`smbclient -N`, вход без пароля) открывает шару `data` — доступную всем и **на чтение,
+  и на запись** — с деревом файлов вымышленной компании (`admin/`, `backup/`, `database/`, `prod/`,
+  `security/`, `logs/`, `important/`). Те же имена позже окажутся «белым списком папок» у демона.
 
-**Dead end — cracking *inside* the honeypot container is unreliable.**
-A Python `crypt()` brute-force loop and `john` both get silently `Killed` mid-run (tight cgroup
-memory or an anti-bruteforce watchdog — never pinned down which). Fix: exfiltrate the hash and
-crack it **locally** — `hashcat -m 500 -a 0 hash.txt rockyou.txt -O` cracks it in under a second:
+  > Мини-словарь: **SMB / Samba** — сетевые «общие папки» (как «Сетевое окружение» в Windows). **шара**
+  > — расшаренная (открытая по сети) папка. **баннер** — строка-визитка, которую сервис показывает при
+  > подключении. **`ping` / ICMP** — простейшая проверка «ты живой?»; хост может быть жив, но не
+  > отвечать на неё.
+
+## 3. Как мы дошли до решения (главный раздел)
+
+**Наблюдение 1 — `sudo NOPASSWD:ALL` выглядит «той самой дырой», но это не она.**
+`sudo -n cat /root/flag.txt` → *No such file*; полный `sudo -n find / -iname '*flag*'` и рекурсивный
+`grep -rIl "avito{"` — оба пусты. Гипотеза: эта машина — наживка, а строчка MOTD про «внутреннюю сеть»
+показывает на второй хост, который мы ещё не нашли.
+
+**Тупик — пинг-скан «подтверждает» лабиринт приманок.**
+`nmap -sn` по подсети находит только шлюз; прыжок в него даёт ещё один такой же `analyst`, и так по
+кругу в трёх независимых подсетях. Параллельная проверка «а нельзя ли сбежать из контейнера»
+(возможности, `docker.sock`, cgroup `release_agent`, SUID-бинарники) везде чиста. Первый заход сделал
+вывод «настоящего хоста этим путём не достать» — **и это была ошибка**: пинг-скан молча пропускает
+любой хост, который не отвечает на `ping`, а `hv-storage-01` как раз такой.
+
+> Мини-словарь: **`nmap -sn`** — «пинг-скан»: ищет живые хосты, спрашивая их «ты живой?» через ICMP.
+> Проблема: кто на пинг не отвечает — того он не видит.
+
+**Исправление — перестать доверять `-sn`, стучаться прямо в порты.**
+Скан всей подсети по порту 445 с флагом `-Pn` (не пинговать, а сразу пробовать порт:
+`nmap -Pn -sS -p445 --min-rate 3000 <subnet>/26`) находит второй живой адрес с открытым Samba, которого
+пинг-скан не увидел. Ещё чище — вообще не сканировать, а спросить имя у Docker-DNS:
+`getent hosts hv-storage-01` отвечает сразу. Два независимых метода дали один и тот же хост — уверенно,
+это не очередная приманка.
+
+**Наблюдение 2 — анонимная шара, доступная на запись, набита «внутренними» админ-документами.**
+Гипотеза: где-то в ops-скрипте лежит пароль (частый паттерн в таких задачах). Проверка: читаем все `.sh`
+в `admin/linux/` — файл `remote-backup.sh` жёстко зашивает
+`REMOTE_PASS_HASH='$1$lp9yekC1$…'` для пользователя `operator`, и хеш одинаков на всех свежих инстансах
+(он «запечён» в образ — взломал один раз и годится всегда).
+
+> Мини-словарь: **хеш пароля** — «отпечаток» пароля (из него сам пароль напрямую не прочитать). **взлом
+> хеша** — перебор слов, пока чей-то отпечаток не совпадёт.
+
+**Тупик — ломать хеш прямо в контейнере ненадёжно.**
+Перебор через Python `crypt()` и `john` оба тихо получают `Killed` на полпути (то ли жёсткий лимит
+памяти контейнера, то ли сторож-антибрутфорс — так и не выяснили). Решение: вынести хеш наружу и ломать
+**локально** — `hashcat -m 500 -a 0 hash.txt rockyou.txt -O` подбирает его меньше чем за секунду:
 `operator:monitoring`.
 
-**Observation 3 — `operator` gets world-readable daemon source, not just a shell.**
-SSH as `operator@hv-storage-01` (badger's password does *not* work here — different account
-namespace). `find / -iname '*aegishive*'` turns up `/opt/aegishive/processor.py`, world-readable,
-run as root by `/entrypoint.sh` — the entire "AegisHive Processor" is 207 lines we can read
-directly, no black-box reversing needed. Reading it surfaces three separate bugs at once (full
-detail in §4).
+> Мини-словарь: **`hashcat` / `rockyou.txt`** — популярная программа-переборщик и большой словарь частых
+> паролей. **`-m 500`** — режим для хешей вида `$1$...` (crypt-MD5).
 
-**Blocker A — no writable directory the daemon will accept.**
-`find /data -writable` as operator returns nothing among the *real* whitelisted dirs (all
-root-owned or owned by other fictional users); Samba's `force user = fileshare` on the share
-doesn't help either. Resolved by the whitelist itself: `ALLOWED_DIRECTORIES` has
-`"admin" "security"` with **no comma between them** — Python string-literal concatenation silently
-merges them into one allowed name, `"adminsecurity"`, which has **no matching real directory** —
-so operator can freely `mkdir` it under the world-writable, sticky `/data`.
+**Наблюдение 3 — `operator` получает не просто shell, а исходник демона, читаемый всеми.**
+Заходим по SSH `operator@hv-storage-01` (пароль `badger` тут **не** подходит — другой аккаунт).
+`find / -iname '*aegishive*'` находит `/opt/aegishive/processor.py` — доступный на чтение всем, а
+запускается от root через `/entrypoint.sh`. Весь «AegisHive Processor» — это 207 строк Python, которые
+мы просто читаем, безо всякого реверса. И сразу видим в нём три отдельные ошибки (подробно в §4).
 
-**Blocker B — nothing ever calls `run_backup` as root; this is where the first pass stalled.**
-Exhaustively checked and ruled out every path we could think of before finding the real one:
-- Is `managectl` itself SUID? No — `0755`, plain root:root.
-- `sudo -l` for operator, with the correct password supplied? Zero sudoers entries.
-- A second leaked hash for the other fictional users (`ksmith`, `dpetrova`)? Full-filesystem grep
-  for every common crypt prefix (`$1$ $5$ $6$ $y$ $2a$ $2b$`) finds only operator's. `/etc/shadow`
-  and Samba's `passdb.tdb` are both unreadable. ~40 manually guessed passwords per account — zero
-  hits.
-- An internal scheduler inside `processor.py` that fires backups on a timer (matching the brief's
-  "scheduled backups" wording)? `grep -n "sleep\|Timer\|while True\|Thread"` across the whole
-  207-line file finds exactly one loop — the blocking `server.accept()` loop in `main()` — and a
-  dead `from time import sleep` import that's never called. No timer exists; the "scheduled"
-  language describes the fictional company's *policy* docs, not this simplified daemon.
-- A classic PID-reuse race (kill a process, squat on its about-to-be-freed PID before a root
-  process reuses it)? Reasoned this off without attempting it: nothing on the box ever naturally
-  spawns a process whose cmdline starts with `managectl ` as root (no cron/systemd/scheduler), and
-  the kernel's PID allocator is specifically hardened against fast low-PID reuse — a double
-  near-zero-probability bet not worth the session time.
+> Мини-словарь: **shell** — командная строка. **исходник** — текст программы, который можно прочитать и
+> понять логику. **реверс** — мучительное восстановление логики из скомпилированного кода; тут не нужен,
+> код открыт.
 
-**The breakthrough — re-reading `check_permissions` closely.**
-`get_peer_pid()` calls `SO_PEERCRED` — which hands back the peer's *kernel-verified, unspoofable*
-pid/uid/gid — and then **throws away the uid/gid and keeps only the pid**. `check_permissions()`
-then re-derives trust by re-reading `/proc/<pid>/cmdline` and `/proc/<pid>/status` **fresh, at
-check time**, not at connect time. Since a process keeps its PID across `execve()` (unlike a
-fork), **the very process that opened the connection can change what those files say about itself
-after connecting**, by exec'ing a SUID-root binary with a crafted `argv[0]`. Before writing any
-exploit code, we verified the preconditions that make this possible on this box specifically
-(`NoNewPrivs: 0`, no `nosuid` mount flag, `/usr/bin/su` genuinely has the setuid bit) — cheap checks
-that avoid burning session time on a race that structurally can't work.
+**Блокер A — нет папки, куда `operator` может писать И которую демон примет.**
+`find /data -writable` под `operator` среди *настоящих* папок из белого списка не находит ничего (все
+принадлежат root или другим вымышленным пользователям). Спасает сам белый список: в нём написано
+`"admin" "security"` — **без запятой между ними**. В Python два строковых литерала подряд молча
+склеиваются в один, `"adminsecurity"`, а такой реальной папки нет. Значит `operator` может спокойно сам
+создать (`mkdir`) папку `adminsecurity` внутри общедоступной на запись `/data` — и она пройдёт проверку
+белого списка.
 
-**Turning the idea into a reliable exploit.** `su` invoked with no target user defaults to root and
-blocks forever in `getpass()` on `/dev/tty`, holding euid 0 the whole time — exactly the window we
-need. Two engineering problems remained: (1) each attempt needs its *own* controlling tty for `su`
-to block on (`pty.fork()` per attempt), and (2) we have to win the race against the daemon's
-single-threaded `accept → check_permissions → recv` loop. The trick that makes it reliable: open a
-"blocker" connection first and leave it idle so the daemon stalls in `recv()` on *that* connection;
-the real attack connection then queues harmlessly in the listen backlog with time to finish its
-`execve()` before the daemon ever inspects it. One single-shot attempt lost the race; **25 parallel
-attempts** won reliably on the next run. Gotcha found while tuning: 60 parallel attempts hit the
-container's `pids.max=50` cgroup limit (`BlockingIOError`) — 25 stayed safely under it.
+**Блокер B — никто и никогда не зовёт бэкап от root; тут первый заход застрял.**
+Мы дотошно перебрали и отбросили все мыслимые пути, прежде чем нашли настоящий:
+- Может, сам `managectl` — SUID? Нет, права `0755`, обычный root:root.
+- `sudo -l` под `operator` с правильным паролем? Ни одной записи.
+- Второй утёкший хеш для других вымышленных юзеров (`ksmith`, `dpetrova`)? Полный `grep` по всей
+  файловой системе на все распространённые префиксы crypt (`$1$ $5$ $6$ $y$ $2a$ $2b$`) находит только
+  хеш `operator`. `/etc/shadow` и `passdb.tdb` Samba нечитаемы. ~40 угаданных вручную паролей на аккаунт
+  — ноль попаданий.
+- Внутренний планировщик в `processor.py`, который сам запускает бэкапы по таймеру (как обещает
+  формулировка «плановые бэкапы»)? `grep -n "sleep\|Timer\|while True\|Thread"` по всем 207 строкам
+  находит ровно один цикл — блокирующий `server.accept()` в `main()` — и мёртвый импорт
+  `from time import sleep`, который никто не вызывает. Таймера нет; «плановость» описывает *политику*
+  вымышленной компании в документах, а не этот упрощённый демон.
+- Классическая гонка на переиспользовании PID (убить процесс и занять его вот-вот освобождающийся PID
+  раньше, чем root-процесс переиспользует)? Отбросили без попытки: на машине ничто само не порождает
+  процесс с командной строкой, начинающейся на `managectl ` от root (нет cron/systemd/планировщика), а
+  аллокатор PID ядра специально защищён от быстрого переиспользования маленьких PID — двойная ставка на
+  «почти ноль», не стоящая времени сессии.
 
-**A second, smaller gotcha inside the exploit itself.** The first symlink placement
-(`ln -s /root/flag.txt` directly inside sticky, world-writable `/data`) got `EACCES` from root's
-`tar`: Linux's `fs.protected_symlinks=1` refuses to let a process follow a symlink sitting in a
-sticky world-writable directory unless the follower or the directory owner owns the link. Fix: make
-`/data/adminsecurity` a real, operator-owned, **non-sticky** directory and put the symlink *inside*
-it — `protected_symlinks` doesn't apply there, so root's `tar -h` follows it cleanly.
+**Прорыв — внимательно перечитываем `check_permissions`.**
+Функция `get_peer_pid()` зовёт `SO_PEERCRED` — механизм, который выдаёт **проверенные ядром и
+неподделываемые** pid/uid/gid того, кто подключился к сокету, — и затем **выбрасывает uid/gid, оставляя
+только pid**. А `check_permissions()` заново выводит «доверие», перечитывая `/proc/<pid>/cmdline` и
+`/proc/<pid>/status` **свежими, в момент проверки**, а не в момент подключения. Поскольку процесс
+сохраняет свой PID при `execve()` (в отличие от fork — там новый PID), **сам процесс, открывший
+соединение, может после подключения изменить то, что эти файлы о нём говорят** — выполнив `execve()`
+SUID-root-бинарника с подставленным `argv[0]`. Прежде чем писать эксплойт, мы проверили предпосылки,
+делающие это возможным именно на этой машине: `NoNewPrivs: 0`, у файловой системы нет флага `nosuid`,
+у `/usr/bin/su` реально стоит бит setuid — дешёвые проверки, чтобы не сжечь время сессии на гонку,
+которая структурно не могла бы сработать.
 
-## 4. The vulnerability
+> Мини-словарь: **Unix-сокет** — «локальная труба» для общения программ на одной машине. **`SO_PEERCRED`**
+> — надёжный способ узнать, кто на другом конце трубы (ядро само подтверждает pid/uid). **PID** — номер
+> процесса. **`/proc/<pid>/...`** — «живое досье» процесса, которое ядро отдаёт в виде файлов.
+> **`execve()`** — «стать другой программой, не меняя своего номера PID» (как переодеться, оставшись тем
+> же человеком по паспорту-PID). **SUID-бинарник** (`su`) — программа, которая при запуске повышает тебя
+> до root. **`argv[0]`** — «как программа себя назвала» в списке процессов (это можно подделать).
+> **TOCTOU** («time-of-check to time-of-use») — «проверили в один момент, а используем в другой»: в зазор
+> между проверкой и использованием можно всё подменить.
 
-Three independent bugs in `/opt/aegishive/processor.py`, all required together:
+**Как из идеи получить надёжный эксплойт.** `su`, вызванный без имени пользователя, по умолчанию метит в
+root и **вечно виснет** в `getpass()` на `/dev/tty`, удерживая euid 0 всё это время — ровно то окно,
+которое нам нужно. Осталось два инженерных вопроса: (1) каждой попытке нужен **свой** управляющий
+терминал, чтобы `su` было на чём зависнуть (`pty.fork()` на попытку), и (2) надо выиграть гонку у
+однопоточного цикла демона `accept → check_permissions → recv`. Трюк, делающий это надёжным: сначала
+открываем «блокирующее» соединение и оставляем его молчать — демон застревает в `recv()` на **нём**; а
+настоящее атакующее соединение спокойно ждёт своей очереди в очереди прослушивания (listen backlog) и
+успевает доделать `execve()` до того, как демон его осмотрит. Одиночная попытка гонку проиграла; **25
+параллельных** попыток на следующем прогоне выиграли стабильно. Подводный камень при настройке: 60
+параллельных упёрлись в лимит контейнера `pids.max=50` (`BlockingIOError`) — 25 остаётся с запасом.
 
-1. **TOCTOU authorization via re-read `/proc`, not `SO_PEERCRED`'s own uid.** `get_peer_pid()`
-   extracts only the PID from `SO_PEERCRED` and discards the credentials the kernel already
-   verified. `check_permissions(pid)` then trusts a **fresh** read of `/proc/<pid>/cmdline`
-   (must match `^(/usr/local/sbin/managectl|managectl) `) and `/proc/<pid>/status` (accepts if
-   *either* ruid or euid is root). A connecting process can change both after `connect()` by
-   `execve()`-ing a SUID-root binary with a chosen `argv[0]` — same PID, new identity.
-2. **Missing comma in a Python list literal.** `ALLOWED_DIRECTORIES = [..., "admin" "security",
-   ...]` — adjacent string literals concatenate in Python, silently merging two whitelist entries
-   into one bogus entry `"adminsecurity"` that has no corresponding real directory, i.e. a
-   whitelist-satisfying path fully under attacker control.
-3. **`tar -chf <archive> -C /data <dir>` runs as root with `-h`** (dereference symlinks). Any
-   symlink inside a whitelisted, attacker-writable directory gets its **target's content** —
-   not the link — archived into a world-readable output directory.
+**Второй, мелкий подводный камень в самом эксплойте.** Первая попытка положить симлинк
+(`ln -s /root/flag.txt` прямо в «липкую» общедоступную `/data`) получила `EACCES` от root-овского `tar`:
+в Linux защита `fs.protected_symlinks=1` не даёт процессу пойти по симлинку, лежащему в «липкой»
+(sticky) общедоступной на запись папке, если только по нему не идёт владелец симлинка или владелец
+папки. Решение: сделать `/data/adminsecurity` настоящей папкой, принадлежащей `operator` и **без
+sticky-бита**, и положить симлинк **внутрь** неё — там `protected_symlinks` не действует, и root-овский
+`tar -h` спокойно идёт по симлинку.
 
-## 5. Exploit, step by step
+> Мини-словарь: **симлинк (symlink)** — «ярлык»-указатель на другой файл. **`tar -h`** — упаковать в
+> архив не сам ярлык, а то, на что он указывает («пойти по ярлыку»). **sticky-бит / липкая папка** —
+> режим папки (как у `/tmp`), где каждый может создавать файлы, но удалять/трогать чужие — нет.
+> **`fs.protected_symlinks`** — защита ядра от «подсунутых ярлыков» в липких общих папках.
 
-All of this happens in **one** SSH session (subnet/host are re-randomized every reconnect).
+## 4. В чём именно ошибка (суть уязвимости)
 
-1. **Find the real host** from inside the `badger` analyst container:
+Три независимые ошибки в `/opt/aegishive/processor.py`, и все три нужны вместе:
+
+1. **Проверка прав по перечитанному `/proc`, а не по uid из `SO_PEERCRED` (TOCTOU).** `get_peer_pid()`
+   достаёт из `SO_PEERCRED` только PID и **выкидывает** уже проверенные ядром удостоверения.
+   `check_permissions(pid)` затем доверяет **свежему** чтению `/proc/<pid>/cmdline` (должен совпасть с
+   шаблоном `^(/usr/local/sbin/managectl|managectl) `) и `/proc/<pid>/status` (пускает, если root — либо
+   реальный uid, либо эффективный). Подключившийся процесс может изменить оба после `connect()`, выполнив
+   `execve()` SUID-root-бинарника с выбранным `argv[0]` — тот же PID, новая личность.
+2. **Пропущенная запятая в списке Python.** `ALLOWED_DIRECTORIES = [..., "admin" "security", ...]` —
+   соседние строковые литералы в Python склеиваются, молча превращая две записи белого списка в одну
+   фиктивную `"adminsecurity"`, которой не соответствует ни одна реальная папка, то есть путь под полным
+   контролем атакующего, при этом проходящий проверку.
+3. **`tar -chf <архив> -C /data <папка>` запускается от root с флагом `-h`** (идти по симлинкам). Любой
+   симлинк внутри разрешённой и доступной атакующему на запись папки отдаёт **содержимое своей цели**, а
+   не сам линк, — и оно попадает в архив в общедоступную на чтение выходную папку.
+
+## 5. Эксплойт по шагам
+
+Всё это — в **одной** SSH-сессии (подсеть и хост заново рандомизируются на каждом переподключении).
+
+1. **Найти настоящий хост** изнутри `analyst`-контейнера под `badger`:
    ```
-   getent hosts hv-storage-01        # -> 10.0.<n>.2 (Docker embedded DNS, nameserver 127.0.0.11)
+   getent hosts hv-storage-01        # -> 10.0.<n>.2 (встроенный DNS Docker, nameserver 127.0.0.11)
    ```
-2. **Read the leaked credential** over anonymous SMB and crack it locally:
+2. **Прочитать утёкший пароль** через анонимный SMB и сломать его локально:
    ```
    smbclient -N //hv-storage-01/data -c 'get admin/linux/remote-backup.sh'
    # REMOTE_PASS_HASH='$1$lp9yekC1$OhCfwi88S6riHT9rovIqy0'  (operator)
    hashcat -m 500 -a 0 hash.txt rockyou.txt -O    # -> operator:monitoring
    ```
-3. **SSH in as `operator@hv-storage-01`** (password `monitoring`) and pull the daemon source:
+3. **Зайти по SSH как `operator@hv-storage-01`** (пароль `monitoring`) и вытащить исходник демона:
    ```
    ssh operator@<storage-ip>
-   cat /opt/aegishive/processor.py     # world-readable; confirms all three bugs in §4
+   cat /opt/aegishive/processor.py     # читается всеми; подтверждает все три ошибки из §4
    ```
-4. **Plant the attacker-controlled backup target**, respecting `fs.protected_symlinks`:
+4. **Подложить подконтрольную цель для бэкапа**, обходя `fs.protected_symlinks`:
    ```
    mkdir -p /data/adminsecurity
    chmod 755 /data/adminsecurity
    ln -s /root/flag.txt /data/adminsecurity/flag.txt
    ```
-5. **Win the `SO_PEERCRED` TOCTOU race** and trigger `managectl backup adminsecurity` as root —
-   run the curated `exploit.py` (pure stdlib, no deps) on the storage host as `operator`:
+5. **Выиграть гонку `SO_PEERCRED` TOCTOU** и заставить демон выполнить `managectl backup adminsecurity`
+   от root — запускаем выверенный `exploit.py` (чистый stdlib, без зависимостей) на storage-хосте под
+   `operator`:
    ```
    python3 exploit.py
    # DAEMON RESPONSE: {"ok": true, "result": "/data/backup/adminsecurity-<ts>.tar"}
    ```
-   It opens a "blocker" connection to stall the daemon's `recv()`, then forks an attack connection
-   that sends `backup adminsecurity` and immediately `execve()`s `/usr/bin/su` with
-   `argv[0]="managectl"` — repeated 25× in parallel (via `pty.fork()`, so each `su` gets its own
-   controlling tty to block on) to win reliably against the single-threaded daemon loop.
-6. **Read the archive** — `exploit.py` does this automatically once it sees a new file land in
-   `/data/backup/`, extracting the member matching `flag` and printing its content.
+   Он открывает «блокирующее» соединение, чтобы демон застрял в `recv()`, затем форкает атакующее
+   соединение, которое шлёт `backup adminsecurity` и тут же делает `execve()` `/usr/bin/su` с
+   `argv[0]="managectl"` — повторяя это 25× параллельно (через `pty.fork()`, чтобы у каждого `su` был
+   свой управляющий терминал, на котором зависать) для надёжной победы над однопоточным циклом демона.
+6. **Прочитать архив** — `exploit.py` делает это сам, как только видит новый файл в `/data/backup/`:
+   достаёт из него член, чьё имя совпадает с `flag`, и печатает содержимое.
 
-Driving all of the above through the `ForceCommand`-wrapped, PTY-only sshd (nested: public host →
-`badger` → `sudo -i` → `ssh operator@<storage-ip>` → feed commands) is handled by the companion
-`expect` driver `pivot_oper.exp <operator_password> <cmdfile>`.
+Всё это гоняется сквозь обёрнутый `ForceCommand` SSH, работающий только с настоящим терминалом (вложенно:
+публичный хост → `badger` → `sudo -i` → `ssh operator@<storage-ip>` → скармливаем команды) с помощью
+`expect`-драйвера `pivot_oper.exp <пароль_operator> <файл_команд>`.
 
-## 6. Flag
+## 6. Флаг
 
 ```
 avito{Un1X_SOCK3T_Race_4nD_5TICkY_SymLinK_3XP3rT}
 ```
 
-## 7. Takeaways
+## 7. Мораль — какой это урок
 
-1. **ICMP host discovery has false negatives.** A "maze of decoys" conclusion drawn from `nmap -sn`
-   alone was wrong — the real host simply didn't answer ping. Cross-check with a `-Pn` port probe
-   or, better, whatever name-resolution mechanism the environment actually uses (here, Docker's
-   embedded DNS) before declaring a subnet dead.
-2. **`SO_PEERCRED` gives you a kernel-verified credential at `accept()` time — use it, don't
-   re-derive it.** Re-reading `/proc/<pid>/...` "fresh" after the fact reopens a TOCTOU window: any
-   process that can `execve()` a SUID binary can rewrite its own `cmdline` and effective uid after
-   the socket is already connected, without changing its PID.
-3. **`tar -h` (or any archiver told to follow symlinks) run as root over an attacker-writable
-   directory is an arbitrary-file-read primitive** — and `fs.protected_symlinks` only blocks it
-   when the link sits directly in a sticky, world-writable directory it doesn't own, not when it's
-   one level down in a directory the attacker legitimately owns.
+Здесь сразу три «взрослых» урока, и сила задачи в том, что дыра появляется только на их стыке.
 
-## 8. Artifacts
+- **Что сделали не так (главное).** Демон получил у ядра надёжное удостоверение звонящего
+  (`SO_PEERCRED`) — и **выбросил** его, решив перепроверить «кто там» позже, перечитав файлы в `/proc`.
+  Между «дверь открыли» и «посмотрели документы» возник зазор, за который атакующий переоделся. Это
+  классический TOCTOU: проверять и использовать надо **один и тот же** факт, а не два разных момента.
+- **Почему так вышло.** За этим стоит заблуждение «PID однозначно идентифицирует программу». Нет: процесс
+  сохраняет PID при `execve()`, так что «что говорит `/proc/<pid>` про программу» может измениться прямо
+  под руками у проверяющего.
+- **Как надо было.** Брать uid/gid **прямо из `SO_PEERCRED`** и на них и авторизовать — они проверены
+  ядром в момент подключения и подменить их нельзя. Не перечитывать `/proc` «свежими глазами» после
+  установления соединения.
+- **На что смотреть, чтобы не повторить.**
+  1. Любую проверку «кто ты» делай по данным, зафиксированным в момент подключения, а не по тому, что
+     можно переписать позже. Ищи в коде связку «получили надёжный факт → отбросили → перечитали заново».
+  2. `tar -h` (или любой архиватор, которому велено идти по симлинкам), запущенный от root над папкой,
+     куда пишет атакующий, — это готовый примитив «прочитай любой файл». А `fs.protected_symlinks`
+     спасает только когда линк лежит прямо в липкой общей папке, но не когда он на уровень глубже в папке,
+     которую атакующий законно создал сам.
+  3. Мелочи ломают всё: пропущенная запятая в списке Python превратила белый список в дыру. Списки
+     разрешённого стоит генерировать и проверять, а не набирать вручную построчно.
+  4. Урок разведки: у пинг-скана (`nmap -sn`) есть ложноотрицательные срабатывания — хост, не отвечающий
+     на ICMP, ты попросту не увидишь. Прежде чем объявить подсеть «пустой», перепроверь `-Pn`-пробом
+     портов или, ещё лучше, тем механизмом имён, который реально использует окружение (здесь — встроенный
+     DNS Docker).
 
-- `exploit.py` — curated, self-contained (stdlib only) reproduction of the `SO_PEERCRED` race +
-  symlink-backup trigger; run as `operator` on `hv-storage-01`.
-- `pivot_oper.exp` — `expect` driver that logs in through the `ForceCommand`-wrapped, PTY-only
-  sshd chain (`badger` → `sudo -i` → nested `ssh operator@<storage-ip>`) and feeds it commands.
-- `NOTES.md` / `NOTES2.md` — full raw investigation log across both sessions, including every dead
-  end recounted in §3.
-- `FLAG.txt`, `ACCESS.txt`.
+## 8. Файлы в папке
+
+- `exploit.py` — выверенное самодостаточное (только stdlib) воспроизведение гонки `SO_PEERCRED` +
+  триггер бэкапа по симлинку; запускать под `operator` на `hv-storage-01`.
+- `pivot_oper.exp` — `expect`-драйвер, логинящийся сквозь обёрнутую `ForceCommand` PTY-only цепочку SSH
+  (`badger` → `sudo -i` → вложенный `ssh operator@<storage-ip>`) и скармливающий ей команды.
+- `FLAG.txt`, `ACCESS.txt` — извлечённый флаг и данные доступа (адрес хоста, логин/пароль `badger`).
+
+> Замечание про файлы `processor.py` и `admin/linux/remote-backup.sh`: это файлы **на удалённой машине**
+> (исходник демона на `hv-storage-01` и скрипт в SMB-шаре), которые мы читаем в ходе решения. В нашу
+> папку они не входят и их тут нет — именно поэтому в §8 их нет.

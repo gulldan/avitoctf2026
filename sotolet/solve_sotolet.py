@@ -24,7 +24,7 @@ Approach logic:
      contains the flag.
 
 Usage:
-    python3 solve_sotolet.py [--ip 84.201.131.80] [--pgadmin-port 8080]
+    uv run python sotolet/solve_sotolet.py [--ip 84.201.131.80] [--pgadmin-port 8080]
         [--dispatcher-port 8443]
 """
 
