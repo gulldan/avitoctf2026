@@ -16,6 +16,8 @@ guard и интерпретируется моделью как prompt injection
 
 ---
 
+**Для воспроизведения:** Нужны работающие сервис и его LLM backend. Прохождение Unicode-проверки и выдача флага моделью — отдельные условия; даже `temperature=0` не гарантирует неизменный ответ после смены модели или промпта.
+
 ## 1. Контекст и цель
 
 Web-сервис на Swift/Vapor формирует недельное меню с помощью LLM. `Prompt.swift` подставляет флаг
@@ -25,7 +27,7 @@ Web-сервис на Swift/Vapor формирует недельное меню
 
 Исходные данные: `https://polba-tcavp7a3.avitoctf.ru/` и архив `polba_72c1ca6.zip`.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Стек: Swift + Vapor 4, статический фронт, LLM через сервис DeepInfra (модель
 `stepfun-ai/Step-3.7-Flash`, `temperature=0`).
@@ -186,11 +188,11 @@ avito{M3d0YED_Bez_meda_kAK_ryBa_bEz_V0dy}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - `solve_polba.py` — самодостаточный stdlib-скрипт: строит Unicode Tags payload, отправляет запрос и
   извлекает флаг; endpoint задаётся константой `BASE`.
 
-Исходный архив не входит в version-controlled набор. Ожидаемый локальный путь —
+Исходный архив не входит в набор файлов в Git. Ожидаемый локальный путь —
 `polba/polba_72c1ca6.zip`; extracted source tree размещается в `polba/src/polba/` и также остаётся
 ignored.

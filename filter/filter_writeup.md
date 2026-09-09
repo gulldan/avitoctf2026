@@ -1,4 +1,4 @@
-# HoneyFilter v1 — технический разбор
+# Медофильтр — технический разбор
 
 **Флаг:** `avito{ge7_in_Queu3_F0r_h0N3y!}`
 **Класс:** Network Security / Go / NFQUEUE
@@ -11,6 +11,8 @@
 `--queue-bypass`, поэтому отсутствие userspace consumer переводит фильтрацию в fail-open. После
 остановки `hlp` запрос `/static/honey.txt` проходит без DPI-проверки.
 
+**Для воспроизведения:** Нужен работающий экземпляр Медофильтра. Проверка паники в локальном контейнере требует исходный архив, не включённый в Git; удалённый solver работает через `/ping` и `/static/honey.txt`.
+
 ## 1. Контекст и цель
 
 CDN отдаёт static content из `www-data/`, включая `honey.txt` с флагом. Исходящий traffic проходит
@@ -18,7 +20,7 @@ CDN отдаёт static content из `www-data/`, включая `honey.txt` с 
 `GET /static/honey.txt` полностью помещается в первый reassembled fragment и блокируется. Для анализа
 доступны исходники `filter_74031b7.zip` и адрес service.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Exploit chain выводит DPI-компонент из эксплуатации:
 
@@ -63,10 +65,12 @@ trailer.Add(string(nameAndValue[0]), string(nameAndValue[1]))
 
 ## 4. Корневая причина
 
-Exploit chain состоит из трёх дефектов: unchecked trailer parsing вызывает process panic;
-`supervisord` после исчерпания restart attempts переводит `hlp` в `FATAL`; `--queue-bypass` пропускает
-traffic при отсутствии NFQUEUE consumer. В результате remote process crash приводит к постоянному
-отключению enforcement component и fail-open filtering.
+Unchecked trailer parsing завершает процесс, а `--queue-bypass` пропускает трафик при отсутствии
+NFQUEUE consumer. Для получения флага достаточно промежутка между перезапусками.
+Если быстрые сбои дополнительно исчерпают бюджет запуска supervisor, `hlp` останется в `FATAL`
+и отключение станет постоянным до вмешательства оператора. Сам факт получения флага не различает
+эти два сценария; для подтверждения `FATAL` нужны логи supervisor. Условия перехода описаны в
+[документации Supervisor](https://supervisord.org/subprocess.html#process-states).
 
 ## 5. Эксплуатация
 
@@ -97,12 +101,12 @@ avito{ge7_in_Queu3_F0r_h0N3y!}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`solve_filter.py`](solve_filter.py) — solver для controlled panic через `/ping` и параллельного
   получения `honey.txt` в listener-free interval; sustained crash sequence также может исчерпать
   restart budget `hlp`.
 - [`FLAG.txt`](FLAG.txt) — извлечённый флаг.
 
-`filter_74031b7.zip` и unpacked build context не входят в version-controlled набор; solver не требует
+`filter_74031b7.zip` и unpacked build context не входят в набор файлов в Git; solver не требует
 их для remote run.

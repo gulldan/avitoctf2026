@@ -4,7 +4,7 @@
 **Класс:** Crypto · PQC · hash-based signatures · race condition
 
 Связанный анализ базовой XMSS^MT forgery приведён в
-[`../napaseke/napaseke_writeup.md`](../napaseke/napaseke_writeup.md).
+[НаПасеке](../napaseke/napaseke_writeup.md).
 
 ## Краткое техническое резюме
 
@@ -19,6 +19,8 @@ WOTS+ observations и локальный grind поля `R` позволяют �
 
 ---
 
+**Для воспроизведения:** Для сетевой атаки нужен Linux-клиент с управляемым receive window и действующий invite. `solve/selftest.py` отдельно проверяет подделку XMSS на синтетических данных без сети и TCP-гонки.
+
 ## 1. Контекст и цель
 
 Сервис выдаёт XMSS^MT authentication token для username и предоставляет полный доступ к записи
@@ -27,7 +29,7 @@ WOTS+ observations и локальный grind поля `R` позволяют �
 Исходные данные: endpoint `napaseke-m9ybjl6b.avitoctf.ru:32012`, invite code
 `E3MPQmoiWnaRkA35E8yqwg` и архив исходников `napaseke2_2216157.zip`.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Сервис использует XMSS^MT на MD5 с параметрами `n=16`, `wots_w=256`, `wots_len=18`,
 `full_height=32`, `d=4`; signature имеет размер 1684 байта. Authentication token сериализуется как
@@ -232,7 +234,7 @@ avito{PCheLoV_V3rNUl_sTenu_no_EgO_z4meDliLi}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - `solve/solve_seqstall.py` — основной solver для sequential partial-signature extraction через TCP
   backpressure. Запуск из корня:
@@ -243,6 +245,6 @@ Version-controlled artifacts:
   reused-index signatures → forge `kopatych` → полная verification. Запуск из корня:
   `uv run python napasekev2/solve/selftest.py`.
 
-Исходный архив не входит в version-controlled набор. Ожидаемый локальный путь —
+Исходный архив не входит в набор файлов в Git. Ожидаемый локальный путь —
 `napasekev2/napaseke2_2216157.zip`; extracted source tree размещается в
 `napasekev2/src/napaseke2/` и также остаётся ignored.

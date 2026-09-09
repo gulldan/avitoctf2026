@@ -14,6 +14,8 @@ Password-reset flow хранит target user ID и delivery address в неза�
 
 ---
 
+**Для воспроизведения:** Нужны работающий MyOwnCloud и доступный внешний mailbox. Solver создаёт два аккаунта и использует mail.tm; локальный MailHog из исходников является отдельным способом доставки.
+
 ## 1. Контекст и цель
 
 MyOwnCloud реализует аутентификацию, загрузку и скачивание файлов, sharing по e-mail и password reset.
@@ -24,7 +26,7 @@ MyOwnCloud реализует аутентификацию, загрузку и 
 `notrespassing_5e6d73a.zip` (PHP-приложение `services/app` + Flask-микросервис рассылки писем
 `services/sender` + `docker-compose.yml` с MailHog для локальной разработки).
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Стек: PHP 8.3 без framework, custom router, SQLite и встроенный development server. Отдельный
 Python/Flask-сервис `sender` отправляет письма по SMTP; локальная конфигурация использует MailHog.
@@ -183,11 +185,11 @@ avito{yOuROWnCLoUD_BuT_no7_Your_0wn_fILes}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - `solve_notrespassing.py` — end-to-end solver: регистрация двух аккаунтов, mailbox mail.tm,
   session-state poisoning, получение token, reset пароля и скачивание флага.
 
-Исходный архив не входит в version-controlled набор. Ожидаемый локальный путь —
+Исходный архив не входит в набор файлов в Git. Ожидаемый локальный путь —
 `notrespassing/notrespassing_5e6d73a.zip`; extracted source tree размещается в
 `notrespassing/src/notrespassing/` и также остаётся ignored.

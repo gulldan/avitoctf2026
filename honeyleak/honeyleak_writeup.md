@@ -1,4 +1,4 @@
-# HoneyLeak — технический разбор
+# Не пойман — не медоед (HoneyLeak) — технический разбор
 
 **Флаг:** `avito{c0ngr4t5_0n_cr4ck1ng_th3_sh3ll}`
 **Класс:** Log Forensics / Incident Response
@@ -14,6 +14,8 @@
 
 ---
 
+**Для воспроизведения:** Локальному solver нужны access log и скачанный ZIP (`--log`, `--blob`); оба отсутствуют в Git. Повторный поиск архива через `--probe-c2` дополнительно зависит от доступности учебного C2.
+
 ## 1. Контекст и цель
 
 Исходный artifact — access log nginx:
@@ -26,7 +28,7 @@ honeyleak_access.log   56 873 строки   формат nginx "combined"   03/
 
 Доступен только access log; server access и исходная database отсутствуют.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 - Формат nginx `combined`: source IP, timestamp, `"METHOD path HTTP/version"`, status code, response
   size, referrer и User-Agent.
@@ -57,8 +59,8 @@ honeyleak_access.log   56 873 строки   формат nginx "combined"   03/
 
 - Все четыре requests имеют status `200`, source IP `185.193.88.77` и path, для которого остальные
   probes получают `403/404`. Тот же IP отправляет ещё 1162 scanner requests с другими UA.
-- Сочетание редкого UA и scanner traffic с одного IP указывает на deliberate noise generation для
-  четырёх успешных requests.
+- Сочетание редкого UA и scanner traffic с одного IP согласуется с гипотезой маскировки четырёх
+  запросов среди шума. Один IP сам по себе не доказывает общего оператора или намеренную маскировку.
 - `grep "185.193.88.77" ... | awk -F'"' '{print $3}' | awk '{print $1}' | sort | uniq -c` возвращает
   4×`200` и 1162 requests со status `301/302/403/404/405/500`.
 - **Initial access path.** Четыре successful requests обращаются к
@@ -90,10 +92,11 @@ honeyleak_access.log   56 873 строки   формат nginx "combined"   03/
 - **Content-based identification.** ZIP archive, созданный `7z a -tzip`, начинается с signature
   `PK\x03\x04`. Первые четыре bytes каждого из 1338 objects
   запрашиваются через `Range: bytes=0-3`; совпадает один object:
-  `blob_3po654ppbr.log` (12 МБ, prefix `504b0304`). Он соответствует archive из отдельной successful
-  upload operation, не представленной четырьмя выделенными log entries.
+  `blob_3po654ppbr.log` (12 МБ, prefix `504b0304`). Пароль из журнала открывает этот архив,
+  а внутри находится ожидаемый SQL dump. Это связывает находку с заданием, но способ и момент
+  её загрузки на C2 по четырём выделенным записям установить нельзя.
 
-## 4. Корневая причина
+## 4. Выводы из артефактов
 
 Реконструкция опирается на следующие findings:
 
@@ -104,7 +107,7 @@ honeyleak_access.log   56 873 строки   формат nginx "combined"   03/
 3. `$ts` вычисляется независимо в двух PowerShell invocations, поэтому pack и upload используют
    разные paths. Artifact идентифицируется по content signature, а не filename/timestamp.
 
-## 5. Эксплуатация
+## 5. Восстановление архива
 
 1. Разобрать UA по частоте и найти единственный редкий выброс (4 попадания из 56 873):
    ```bash
@@ -158,7 +161,7 @@ avito{c0ngr4t5_0n_cr4ck1ng_th3_sh3ll}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`recover_secret.py`](recover_secret.py) — solver: разбирает `honeyleak_access.log`, декодирует
   web-shell commands, восстанавливает password/database path/C2 URL и при `--probe-c2` выполняет
@@ -167,5 +170,5 @@ Version-controlled artifacts:
 - [`FLAG.txt`](FLAG.txt) — извлечённый флаг.
 
 `honeyleak_access.log`, recovered ZIP artifact `real_blob.bin` и cached C2 index snapshots не входят
-в version-controlled набор. Для воспроизведения необходимо передать log через `--log` и archive
+в набор файлов в Git. Для воспроизведения необходимо передать log через `--log` и archive
 через `--blob` либо использовать `--probe-c2`, если C2 endpoint доступен.

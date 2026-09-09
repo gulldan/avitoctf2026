@@ -1,4 +1,4 @@
-# HoneyFilter2 — технический разбор
+# Медофильтр 2 — технический разбор
 
 **Флаг:** `avito{NEv3R_goNn4_G3T_In_qU3Ue_fOR_HonEY_7wiCE!}`
 **Класс:** Network Security / Go / NFQUEUE
@@ -7,11 +7,14 @@
 
 Controllable response body endpoint `/ping` используется для parser desynchronization после
 ошибочного buffer reset в `responce.Add`. Crafted fragment `Content-Length: 0` с malformed trailer
-вызывает Go panic в `TrailerNonChanked`. После серии быстрых crash `supervisord` переводит `hlp` в состояние
-`FATAL`. Правило NFQUEUE настроено с `--queue-bypass`, поэтому отсутствие userspace consumer переводит
-DPI в fail-open и позволяет получить `/static/honey.txt` без inspection.
+вызывает Go panic в `TrailerNonChanked`. Пока процесс перезапускается и NFQUEUE consumer отсутствует,
+`--queue-bypass` пропускает ответ `/static/honey.txt` без DPI-проверки. Серия быстрых сбоев может
+дополнительно исчерпать бюджет запуска supervisor и оставить `hlp` в `FATAL`; для получения флага
+достаточно короткого промежутка без listener.
 
 ---
+
+**Для воспроизведения:** Нужен работающий Медофильтр 2. Для повторения анализа parser требуется исходный архив и Linux-контейнер с NFQUEUE; они не входят в готовое окружение uv.
 
 ## 1. Контекст и цель
 
@@ -23,7 +26,7 @@ CDN раздаёт файлы из `www-data/`, включая `honey.txt`. Ис
 
 Доступны полные исходники в `filter_74031b7.zip` и адрес target service.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 В одном контейнере запущены два Go-процесса под управлением `supervisord`:
 
@@ -235,11 +238,11 @@ avito{NEv3R_goNn4_G3T_In_qU3Ue_fOR_HonEY_7wiCE!}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`solve_filter2.py`](solve_filter2.py) — self-contained solver: вызывает controlled panic через
   `/ping` и параллельно получает `honey.txt` в listener-free interval; base URL параметризован.
 - [`FLAG.txt`](FLAG.txt) — извлечённый флаг.
 
-`filter_74031b7.zip` и local build context не входят в version-controlled набор; remote solver
+`filter_74031b7.zip` и local build context не входят в набор файлов в Git; remote solver
 использует только HTTP endpoints `/ping` и `/static/honey.txt`.

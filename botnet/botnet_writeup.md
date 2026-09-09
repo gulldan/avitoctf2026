@@ -13,6 +13,8 @@ Registry HTTP API загружается слой образа `fastapi`, сод
 
 ---
 
+**Для воспроизведения:** Нужны действующий SSH-доступ и пароль через `--password` или `BOTNET_PASS`. Solver удерживает один интерактивный сеанс, поскольку адреса и Registry меняются при переподключении.
+
 ## 1. Контекст и цель
 
 Задача предоставляет shell-доступ к узлу в контейнерной сети. Образ не содержит стандартных
@@ -22,7 +24,7 @@ userspace-утилит, поэтому reconnaissance и exfiltration должн
 `K8jjxsRJilXcCWfMyFvxGQ`. Исходный код отсутствует; исследование выполняется в
 режиме black-box.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 - SSH предоставляет interactive Bash session внутри контейнера.
 - Сообщение `Booting up the challenge...` при установлении session указывает, что для каждого
@@ -177,7 +179,7 @@ avito{the_bo7ne7_15_CompL3tely_ComPRomISed}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`solve_botnet.py`](solve_botnet.py) — self-contained Python solver (stdlib, `subprocess` и `ssh`),
   воспроизводящий всю цепочку §5 за одну SSH-сессию: network discovery → Registry identification →
@@ -185,4 +187,4 @@ Version-controlled artifacts:
 - [`FLAG.txt`](FLAG.txt) — сохранённый флаг.
 
 SSH password передаётся solver через `--password` или environment variable `BOTNET_PASS`; default
-credential в коде отсутствует. Session-local `ACCESS.txt` не входит в version-controlled набор.
+credential в коде отсутствует. Session-local `ACCESS.txt` не входит в набор файлов в Git.

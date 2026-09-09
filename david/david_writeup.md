@@ -13,6 +13,8 @@ linear memory. Контролируемый экспорт `best_move() -> i64` 
 
 ---
 
+**Для воспроизведения:** Архив общего сервиса David/Goliath включён в Git. Полный запуск требует Linux-экземпляр совместимой сборки; смещения памяти из наблюдений нельзя считать универсальными для любой версии runtime.
+
 ## 1. Контекст и цель
 
 Необходимо извлечь секрет из linear memory штатного WASM-модуля. Основная attack surface находится
@@ -26,7 +28,7 @@ integration `mcu-max.py`, engine
 
 Цель — прочитать флаг из linear memory экземпляра `BEE_PLAYER`.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Сервис реализован на FastAPI и использует `wasmtime==45.0.0` для исполнения WASM-модулей. Критичный
 код находится в классе `Player` файла `mcu-max.py`:
@@ -279,7 +281,7 @@ avito{honey_badger_does_not_check_bounds_cf9ff3558ae0277f}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`solve_david.py`](solve_david.py) — solver: собирает WASM payload через `wat2wasm`, загружает его,
   вызывает `/api/best-move?fen=x b` и перебирает candidate offsets между process restarts.
@@ -292,4 +294,4 @@ Version-controlled artifacts:
   host filesystem disclosure.
 
 Canonical source archive находится в `../goliath/goliath_c8c718c.zip`; session-local duplicate в
-directory `david/` не входит в version-controlled набор.
+directory `david/` не входит в набор файлов в Git.

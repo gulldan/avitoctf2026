@@ -14,6 +14,8 @@ UID 0 и прочитать `/root/flag.txt`.
 
 ---
 
+**Для воспроизведения:** Нужен работающий Linux-worker; timeout-запросы должны попадать в один долгоживущий процесс. `--self-test` проверяет генерацию ELF и DES-crypt на локальной фикстуре.
+
 ## 1. Контекст и цель
 
 Сервис принимает Linux x86-64 ELF binaries, resource limits и timeout, после чего выполняет binary с
@@ -21,7 +23,7 @@ UID аутентифицированного пользователя. Дост�
 демонстрационный binary. Цель — прочитать `/root/flag.txt`, доступный только UID 0. Основной артефакт
 для анализа — worker binary `sandbox_worker.elf`.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Инстанс доступен по `https://elflambda-<id>.avitoctf.ru`. API предоставляет следующие endpoints:
 
@@ -159,11 +161,11 @@ avito{Ea5Y_fIL3_DE5CrIP70R_l3ak}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - `solve_sotolambda.py` — основной end-to-end entry point для upload→fd leak→DES crack→root invoke.
   Быстрая локальная проверка ELF и хэша: `uv run python sotolambda/solve_sotolambda.py --self-test`.
 - `mkelf.py` — генератор `shell.elf` (159-байтный статический `execve("/bin/sh")` payload).
 
-Анализируемый worker binary не входит в version-controlled набор. Ожидаемый локальный путь —
+Анализируемый worker binary не входит в набор файлов в Git. Ожидаемый локальный путь —
 `sotolambda/sandbox_worker.elf`; файл остаётся ignored.

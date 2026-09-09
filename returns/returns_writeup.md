@@ -15,13 +15,15 @@ Internet, а выданный ACL principal имеет доступ к обще�
 
 ---
 
+**Для воспроизведения:** Нужны действующая сессия (либо reCAPTCHA для новой заявки) и сетевой доступ к Redis из JWT. Solver изменяет запись решения в памяти созданной сессии.
+
 ## 1. Контекст и цель
 
 Сервис `https://returns-dllgqpqo.avitoctf.ru/` обрабатывает заявки на возврат через несколько n8n
 workflows и LLM agents. Цель — получить поле `result.voucher`, содержащее флаг. Исходный код backend
 недоступен; анализ выполняется по React/Vite bundle, observable API и данным session token.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 `GET /` возвращает React/Vite application. Статический анализ `index-*.js` выявляет Express API:
 
@@ -169,7 +171,7 @@ avito{MaKE_a_refUND__4n_3V1l_hON3Y_baDGER_Ha5_COM3_TO_Me}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - `solve_returns_redis.py` — end-to-end реализация
   (JWT → Redis → изменение verdict → escalation → voucher), RESP-клиент на socket, режимы

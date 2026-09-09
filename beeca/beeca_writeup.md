@@ -15,6 +15,8 @@ TLS SNI и HTTP `Host` и не выполняет authentication/authorization. 
 
 ---
 
+**Для воспроизведения:** Локальному solver нужны два разных leaf-сертификата одного CA; они не включены в Git. Получение сертификатов и проверка подделки требуют работающего BeeCA и OAuth-сессии.
+
 ## 1. Контекст и цель
 
 Целевой ресурс доступен только с client certificate, subject которого содержит `CN=admin`.
@@ -31,7 +33,7 @@ TLS SNI и HTTP `Host` и не выполняет authentication/authorization. 
 Решение требует связать недостатки virtual-host isolation, enrollment state machine и RSA key
 generation в единую exploit chain.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 **Portal API**, восстановленный из минифицированного bundle `portal.js`:
 
@@ -176,18 +178,20 @@ key.
 
 ## 4. Корневая причина
 
-Exploit chain состоит из трёх дефектов; каждый из них по отдельности недостаточен для выпуска
-сертификата `CN=admin`:
+В цепочке нужно различать ошибки защиты и нормальные свойства PKI. Основные дефекты — доступный
+без авторизации issuer и слабый RSA-ключ. Возможность получить несколько обычных сертификатов
+сама по себе не должна нарушать безопасность CA:
 
 1. **Missing authentication and authorization.** `POST /internal/cert?uuid=&action=approve` на
    `certissue-bv5kavo6.internal` доверяет network location. Internal virtual host доступен через тот
    же edge IP при согласованных TLS SNI и HTTP `Host`.
-2. **Unrestricted re-enrollment.** После перехода текущего request в `declined` аккаунт может создать
-   новую запись с новым key pair и serial. Это предоставляет несколько подписей CA над известными
-   TBS structures.
-3. **Weak RSA key generation.** Две PKCS#1 v1.5 signatures раскрывают modulus как
-   `gcd(s1^e − EM1, s2^e − EM2)`, а коррелированные prime factors допускают factorization методом
-   Lehman при `k=99`.
+2. **Получение материала для анализа.** Переход в `declined` и новый enrollment дают вторую
+   подпись над другими TBS bytes. Повторная выдача сертификатов — обычная возможность PKI;
+   уязвимостью является отсутствие авторизации переходов `approve`/`decline`.
+3. **Weak RSA key generation.** GCD двух выражений `s^e − EM` позволяет восстановить `N`
+   с возможным общим множителем. Но `N` является частью открытого ключа и не обязан быть секретным.
+   Компрометацию CA даёт факторизация слабого `N` методом Лемана при `k=99`, после которой
+   восстанавливается закрытый показатель `d`.
 
 ## 5. Эксплуатация
 
@@ -251,18 +255,19 @@ avito{uZUzUlEy_WeaK_CrYp7O_vIBeee}
 - **Network isolation.** Internal issuer нельзя защищать только отсутствием публичной DNS-записи.
   Необходимы отдельный network segment, mTLS и application-level authorization.
 - **RSA modulus recovery.** При известных encoded messages выполняется `s^e − EM = k·N`; GCD двух
-  значений восстанавливает modulus и при `e=65537`. Значение public exponent не предотвращает эту
-  атаку.
+  значений даёт кратное modulus и при `e=65537`. Восстановление открытого `N` не нарушает гарантий
+  RSA; опасность возникает из-за возможности факторизовать его.
 - **CA key generation.** Prime factors должны генерироваться независимым CSPRNG и проходить проверки
   на известные классы слабых RSA moduli, включая Fermat, batch-GCD, ROCA и Lehman.
 - **Enrollment state machine.** Необходимо различать идемпотентный повтор request и выпуск новой записи,
-  ограничивать re-enrollment и выполнять authorization при `approve`/`decline`.
-- **Defense in depth.** Ограничение re-enrollment уменьшает доступ к signing oracle, но не заменяет
-  authentication internal issuer и безопасную RSA key generation.
+  а также проверять полномочия и допустимость перехода при `approve`/`decline`.
+- **Граница защиты.** Безопасность CA не должна зависеть от секретности modulus или малого числа
+  выданных сертификатов. Ограничение enrollment не заменяет авторизацию issuer и безопасную
+  генерацию RSA-ключей.
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`recover_ca_and_forge.py`](recover_ca_and_forge.py) — end-to-end solver: восстанавливает modulus
   CA `N` из двух или более leaf certificates (`N = gcd(s1^e − EM1, s2^e − EM2)`), раскладывает его
@@ -271,5 +276,5 @@ Version-controlled artifacts:
 - [`FLAG.txt`](FLAG.txt) — сохранённый флаг.
 
 Extracted `portal.js`, service responses, PKCS#12 containers, `leaf*.crt` и `firstprompt.txt` не входят
-в version-controlled набор. Solver создаёт `admin_forged.crt` и `admin_forged.key` в runtime; эти
-output files также не version-controlled.
+в набор файлов в Git. Solver создаёт `admin_forged.crt` и `admin_forged.key` в runtime; эти
+output files также не включены в Git.

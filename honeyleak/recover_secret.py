@@ -6,9 +6,10 @@ a trap: dozens of IPs do that and none of them succeed. The real signal is a
 *User-Agent frequency* outlier: of 27 distinct UAs in the file, one
 (``MSIE 10.0 ... Trident/6.0``) appears only 4 times, and all 4 hits return
 HTTP 200 on a path (``/aspnet_client/system_web/healthcheck.aspx?cmd=<b64>``)
-that 7 other scanning IPs probed but never found. Those 4 requests *are* the
-whole attack, hidden inside ~1166 decoy scanner requests the attacker fired
-from the very same source IP as camouflage.
+that 7 other scanning IPs probed but never found. Those four requests reveal
+the observed command sequence. Traffic from the same IP is consistent with
+camouflage, but the log does not establish the complete intrusion or the
+successful archive upload path.
 
 Base64-decoding each ``cmd=`` payload reconstructs the kill chain: recon ->
 7z the accounting DB into a password-protected archive -> curl-upload it to a

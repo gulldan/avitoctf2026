@@ -55,10 +55,10 @@ interleaved encoding и не увеличивает счётчик, если т�
 
 | № | Файл | Декодированный host |
 |---|---|---|
-| 1 | `task5/onmute/server/src/seed.js` | `mutedgift-9oevcdih.avitoctf.ru` |
-| 2 | `task6/marketplugins/PluginScanner.java` | `marketdone-cgttbdfl.avitoctf.ru` |
-| 3 | `task6/extracted/marketplugins/PluginScanner.java` | `marketdone-cgttbdfl.avitoctf.ru` |
-| 4 | `task17/beesix/server.py` | `beeintel-atfjzchx.avitoctf.ru` |
+| 1 | `onmute/onmute/server/src/seed.js` | `mutedgift-9oevcdih.avitoctf.ru` |
+| 2 | `b2bee/marketplugins/PluginScanner.java` | `marketdone-cgttbdfl.avitoctf.ru` |
+| 3 | `b2bee/extracted/marketplugins/PluginScanner.java` | `marketdone-cgttbdfl.avitoctf.ru` |
+| 4 | `beesix/beesix/server.py` | `beeintel-atfjzchx.avitoctf.ru` |
 | 5 | `slophacking/src/slophacking/api/main.go` | `aitreasure-3afw6lrp.avitoctf.ru` |
 | 6 | `slophacking/src/slophacking/executor/main.go` | `aitreasure-3afw6lrp.avitoctf.ru` |
 | 7 | `sotek/src/sotek/src/app/api/register/route.ts` | `zaletay-vh85lk0q.avitoctf.ru` |
@@ -68,8 +68,8 @@ interleaved encoding и не увеличивает счётчик, если т�
 
 | Archive | Entry | Декодированный host |
 |---|---|---|
-| `task5/onmute_a003aa0.zip` | `onmute/server/src/routes/comments.js` | `mutedgift-9oevcdih.avitoctf.ru` |
-| `task5/onmute_a003aa0.zip` | `onmute/server/src/seed.js` | `mutedgift-9oevcdih.avitoctf.ru` |
+| `onmute/onmute_a003aa0.zip` | `onmute/server/src/routes/comments.js` | `mutedgift-9oevcdih.avitoctf.ru` |
+| `onmute/onmute_a003aa0.zip` | `onmute/server/src/seed.js` | `mutedgift-9oevcdih.avitoctf.ru` |
 | `slophacking/slophacking_56b682c.zip` | `slophacking/api/main.go` | `aitreasure-3afw6lrp.avitoctf.ru` |
 | `slophacking/slophacking_56b682c.zip` | `slophacking/executor/main.go` | `aitreasure-3afw6lrp.avitoctf.ru` |
 | `sotek/sotek_4d9e047.zip` | `sotek/src/app/api/register/route.ts` | `zaletay-vh85lk0q.avitoctf.ru` |

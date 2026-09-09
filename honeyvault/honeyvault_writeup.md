@@ -14,6 +14,8 @@ privileged `tar -h` выполняет symlink dereference для `/root/flag.tx
 
 ---
 
+**Для воспроизведения:** Нужен действующий SSH-доступ и переход на `hv-storage-01` под `operator`. `exploit.py` запускается на storage host; локальный запуск на рабочем компьютере не воспроизводит эту среду.
+
 ## 1. Контекст и цель
 
 Публичный host предоставляет доступ к внутренней Docker network, где работает root daemon AegisHive
@@ -21,7 +23,7 @@ Processor (`managectl`). Цель — использовать его backup ope
 
 Initial access: `ssh badger@honeyvault-<id>.avitoctf.ru`; password выдаётся при создании instance.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Исходные observations:
 
@@ -196,13 +198,13 @@ avito{Un1X_SOCK3T_Race_4nD_5TICkY_SymLinK_3XP3rT}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`exploit.py`](exploit.py) — self-contained stdlib solver для `SO_PEERCRED` race и privileged
   backup с symlink dereference; запускать под `operator` на `hv-storage-01`.
 - [`FLAG.txt`](FLAG.txt) — извлечённый флаг.
 
 `processor.py` и `admin/linux/remote-backup.sh` находятся на удалённой машине и не входят в
-version-controlled набор. `exploit.py` запускается после interactive pivot на `hv-storage-01`;
+набор файлов в Git. `exploit.py` запускается после interactive pivot на `hv-storage-01`;
 target credentials передаются только при подключении. Session-local `ACCESS.txt` и `pivot_oper.exp`
-с ephemeral instance parameters также не version-controlled.
+с ephemeral instance parameters также не включены в Git.

@@ -13,6 +13,8 @@ read/write в адресном пространстве Python-процесса.
 
 ---
 
+**Для воспроизведения:** Архив сервиса включён в Git. Запуск без `--url` проверяет локальный примитив; полная цепочка требует совместимый Linux-стенд с указанными в разборе Python, Wasmtime и layout объектов.
+
 ## 1. Контекст и цель
 
 Доступны исходники сервиса `goliath` ([`goliath_c8c718c.zip`](goliath_c8c718c.zip)) и персональный
@@ -20,14 +22,14 @@ Docker-инстанс.
 Backend использует WASM-движок `mcu-max`. Сервис содержит две отдельные цели:
 
 - **David (module memory)** — скомпилирован в `mcu-max.wasm` через `-DFLAG` (`mcu-max-wrap.c`:
-  `static char fen_buf[256] = FLAG;`) и доступен через inter-module OOB read. Анализ приведён в
+  `static char fen_buf[256] = FLAG;`) и доступен через inter-module OOB read. Анализ приведён
   в [разборе David](../david/david_writeup.md).
 - **Goliath (host filesystem)** — `/flag` создаётся через `COPY fs/ /` и имеет mode `0400`. Service не
   открывает file до exploitation, поэтому его content отсутствует в process memory.
 
 Цель Goliath — выйти за границы WASM linear memory и прочитать host-файл `/flag`.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 **Стек** (по `requirements.txt`/`Dockerfile`): FastAPI 0.138.1 + uvicorn, wasmtime 45.0.0, база
 `debian:bookworm-slim` (glibc 2.36, Python 3.11). `USER` в `Dockerfile` не задан, поэтому процесс
@@ -231,7 +233,7 @@ avito{h0NEy_BadgEr_p0PPed_7h3_wasM_saNDb0X}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`solve_goliath.py`](solve_goliath.py) — exploit solver. Без `--url` выполняет local API self-check;
   с `--url` проверяет primitive на target; `--url … --full` выполняет end-to-end chain:

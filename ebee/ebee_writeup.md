@@ -1,4 +1,4 @@
-# eBee — технический разбор
+# Медовая ловушка (eBee) — технический разбор
 
 **Флаг:** `avito{eBeepf_is_awes8me_4_ev3ryth1ng}`
 **Класс:** Memory Forensics / Linux / eBPF
@@ -14,6 +14,8 @@
 
 ---
 
+**Для воспроизведения:** Нужен исходный дамп RAM, который не включён в Git. Carving-solver работает локально без ISF; анализ через Volatility дополнительно требует профиль именно исследованного ядра.
+
 ## 1. Контекст и цель
 
 Дан образ оперативной памяти Linux-хоста `honeykeeper` (`honeykeeper_dump.img`, ~1.6 ГБ). Требуется
@@ -21,7 +23,7 @@
 
 Анализ выполняется offline по static memory image.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 **Tooling.** Volatility3 запускается из корневого `uv` environment (Python 3.12). Kernel version —
 `Linux version 6.17.0-35-generic` (Ubuntu). Standard Volatility distribution не содержит ISF для
@@ -59,7 +61,8 @@ linked list, используемом `pslist`.
 (`grep`, `dbus-send`, `xdg-mime`, `StyleThread#…`). Это terminated processes, structures которых ещё
 присутствуют в memory image.
 
-Активных процессов, присутствующих только в `psscan`, нет. Implant не использует DKOM process hiding.
+В этом сравнении активных процессов, присутствующих только в `psscan`, нет. Это не даёт признаков
+DKOM-скрытия процесса в полученной выборке; дальнейший анализ переносится на tracing hooks и eBPF.
 
 ### 3.3. Tracing hooks и eBPF inventory
 
@@ -170,7 +173,7 @@ keeper⇥avito{eBeepf_is_awes8me_4_ev3ryth1ng}⏎
 Поток содержит `keeper`, Tab, флаг и Enter. Первые 10 символов совпадают с `current_buffer`
 (`keeper⇥avi`), что независимо подтверждает декодирование.
 
-## 4. Корневая причина
+## 4. Механизм импланта и кодирования
 
 Возможность восстановить данные implant обусловлена следующими design properties:
 
@@ -184,7 +187,7 @@ keeper⇥avito{eBeepf_is_awes8me_4_ev3ryth1ng}⏎
   Data находятся в structures `bpf_array` и `bpf_queue_stack`
   (значения по смещению +264), достижимых через `prog_idr → bpf_prog.aux.used_maps`.
 
-## 5. Эксплуатация
+## 5. Воспроизведение анализа
 
 Основной workflow использует Volatility3 и ISF для kernel `6.17.0-35-generic`:
 
@@ -238,7 +241,7 @@ avito{eBeepf_is_awes8me_4_ev3ryth1ng}
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`solve_ebee.py`](solve_ebee.py) — self-contained stdlib solver: выполняет carving keylogger records
   из raw дампа и декодирует флаг.
@@ -248,7 +251,7 @@ Version-controlled artifacts:
 - [`FLAG.txt`](FLAG.txt) — извлечённый флаг.
 
 Memory images `honeykeeper_dump.img`, `honeykeeper_dump.img.xz` и generated `ebee_mapdump/` не входят
-в version-controlled набор.
+в набор файлов в Git.
 Для запуска `solve_ebee.py` image path передаётся позиционным аргументом; default filename —
 `honeykeeper_dump.img`. Workflow с `ebeemaps.py` дополнительно требует Volatility3 ISF для kernel
 `6.17.0-35-generic`.

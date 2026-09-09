@@ -38,9 +38,9 @@ respect-gitignore = false
 # Не форматируем дословно сохранённые исходники заданий и вендоренный Aim UI.
 extend-exclude = [
     "david/src",
-    "task13/aimsrc",
-    "task13/aim_ui_core.py",
-    "task17/beesix",
+    "brainwash/aimsrc",
+    "brainwash/aim_ui_core.py",
+    "beesix/beesix",
 ]
 
 [tool.ruff.format]
@@ -119,9 +119,9 @@ respect-ignore-files = false
 exclude = [
     ".venv",
     "david/src",
-    "task13/aimsrc",
-    "task13/aim_ui_core.py",
-    "task17/beesix",
+    "brainwash/aimsrc",
+    "brainwash/aim_ui_core.py",
+    "beesix/beesix",
 ]
 
 [tool.ty.rules]

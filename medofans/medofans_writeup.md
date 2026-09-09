@@ -13,6 +13,8 @@ bind-mounted backup `/opt/backups/hbf_de_backup_2019-05-05.sql`, содержа�
 
 ---
 
+**Для воспроизведения:** Нужны работающий сервис и сервер обратного вызова, доступный с него по TCP/3306. HTTP-туннель сам по себе не переносит MySQL-протокол.
+
 ## 1. Контекст и цель
 
 `https://hbfuns-9vqogw6q.avitoctf.ru/` — Bulma/JavaScript frontend. Dynamic content загружается через
@@ -27,7 +29,7 @@ backup.
 
 Доступен только адрес target; `content.php` восстанавливается через arbitrary file read из §3.
 
-## 2. Reconnaissance и attack surface
+## 2. Разведка и поверхность атаки
 
 Remote reconnaissance определяет следующий stack:
 
@@ -72,8 +74,9 @@ lang=8.8.8.8%00   → "...8.8.8.8 .db.internal: Connection timed out"   ~3.1 с�
 - **Порт всегда 3306.** Двоеточие в `lang` срабатывает раньше NUL-логики: код делает `explode(':')` и
   удаляет всё после `:`, поэтому port не контролируется. Rogue server должен слушать
   именно порт **3306** (стандартный порт MySQL).
-- **Outbound connectivity.** Timeout при соединении с публичными адресами на `:3306` подтверждает,
-  что target может установить connection с external exploit server.
+- **Outbound connectivity.** Timeout при обращении к публичному `:3306` не доказывает достижимость:
+  его может вызывать сетевой фильтр или неработающий сервер. Доступность подтверждается принятым
+  соединением и MySQL handshake на контролируемом сервере, а затем фактической передачей файла.
 
 ### 3.3. Rogue MySQL server + `LOAD DATA LOCAL INFILE`
 
@@ -191,7 +194,7 @@ Exploit chain объединяет NUL truncation в системном resolver
 
 ## 8. Файлы для воспроизведения
 
-Version-controlled artifacts:
+В репозитории:
 
 - [`solve_medofans.py`](solve_medofans.py) — solver: поднимает rogue MySQL, инициирует SSRF и
   определяет flag path через `mountinfo` (stdlib + `requests`). Параметры `--target` /
@@ -203,5 +206,5 @@ Version-controlled artifacts:
 - [`FLAG.txt`](FLAG.txt) — извлечённый флаг.
 
 Recovered `content.php`, `config.php`, `/proc/self/mountinfo` и SQL backup не входят в
-version-controlled набор; solver получает необходимые runtime artifacts через `LOCAL INFILE`.
-Frontend image `badger.svg` не требуется solver и также не version-controlled.
+набор файлов в Git; solver получает необходимые runtime artifacts через `LOCAL INFILE`.
+Frontend image `badger.svg` не требуется solver и также не включены в Git.
