@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>chat</title></head>
+<body>
+<h1>support</h1>
+<script>
+  var __p = new URLSearchParams(location.search);
+  window.intercomSettings = { app_id: "r84vggjn" };
+  if (__p.get('email')) window.intercomSettings.email = __p.get('email');
+  if (__p.get('name')) window.intercomSettings.name = __p.get('name');
+  if (__p.get('user_id')) window.intercomSettings.user_id = __p.get('user_id');
+</script>
+<script>
+(function(){var w=window;var ic=w.Intercom;if(typeof ic==="function"){ic('reattach_activator');ic('update',w.intercomSettings);}else{var d=document;var i=function(){i.c(arguments);};i.q=[];i.c=function(args){i.q.push(args);};w.Intercom=i;var l=function(){var s=d.createElement('script');s.type='text/javascript';s.async=true;s.src='https://widget.intercom.io/widget/r84vggjn';var x=d.getElementsByTagName('script')[0];x.parentNode.insertBefore(s,x);};if(document.readyState==='complete'){l();}else if(w.attachEvent){w.attachEvent('onload',l);}else{w.addEventListener('load',l,false);}}})();
+</script>
+<script>
+  // Helper: open messenger and prefill a message. Auto-send still requires clicking the composer send button in the Intercom iframe (cross-origin) via CDP.
+  window.__openChat = function(msg){ try{ window.Intercom('showNewMessage', msg||''); }catch(e){ console.log('err',e);} };
+  window.addEventListener('load', function(){ setTimeout(function(){ try{ window.Intercom('show'); }catch(e){} }, 1500); });
+</script>
+</body></html>

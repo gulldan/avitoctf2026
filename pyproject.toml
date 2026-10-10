@@ -1,0 +1,105 @@
+[project]
+name = "avitoctf2026"
+version = "0.1.0"
+description = "Avito CTF 2026 writeups and solvers"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aim==3.29.1",
+    "cryptography",
+    "fastapi==0.138.1",
+    "gmpy2",
+    "httpx",
+    "httpx2==2.12.0",
+    "numpy",
+    "paramiko",
+    "pillow",
+    "python-multipart==0.0.32",
+    "requests>=2.34.2",
+    "uvicorn==0.49.0",
+    "volatility3",
+    "wasmtime==45.0.0",
+    "websocket-client",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.21",
+    "ty>=0.0.58",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+respect-gitignore = false
+extend-exclude = [
+    "david/src",
+    "brainwash/aimsrc",
+    "brainwash/aim_ui_core.py",
+    "beesix/beesix",
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "D203",
+    "D213",
+    "RUF001", "RUF002", "RUF003",
+    "TRY003", "EM101", "EM102",
+    "S603", "S607",
+
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    "D205", "D212", "D400", "D401", "D404", "D415", "D417",
+    "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204", "ANN206", "ANN401",
+    "T201", "T203",
+    "S101", "S104", "S105", "S106", "S108", "S110", "S112", "S113",
+    "S301", "S302", "S310", "S311", "S314", "S321", "S324", "S507", "S605", "S608",
+    "PLR2004", "PLR0911", "PLR0912", "PLR0913", "PLR0914", "PLR0915", "PLR0916", "PLR0917",
+    "C901",
+    "PLW0602", "PLW0603", "PLW1510", "PLW1514", "PLW2901",
+    "PTH",
+    "N802", "N803", "N806", "N814", "N815", "N816",
+    "INP001",
+    "EXE001", "EXE002",
+    "BLE001",
+    "SIM105", "SIM115",
+    "E402",
+    "E501",
+    "E741",
+    "ERA001",
+    "TRY300", "TRY301",
+    "FBT001", "FBT002", "FBT003",
+    "SIM905",
+    "UP031",
+    "PERF",
+    "PLC0415",
+    "DTZ",
+    "TRY004",
+    "ARG001", "ARG002", "ARG003", "ARG004", "ARG005",
+    "D301",
+    "B023",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.environment]
+python-version = "3.12"
+root = ["./"]
+
+[tool.ty.src]
+respect-ignore-files = false
+exclude = [
+    ".venv",
+    "david/src",
+    "brainwash/aimsrc",
+    "brainwash/aim_ui_core.py",
+    "beesix/beesix",
+]
+
+[tool.ty.rules]
+all = "error"
